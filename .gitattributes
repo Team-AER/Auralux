@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+*.swift text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.plist text eol=lf
+
+*.wav binary
+*.flac binary
+*.mp3 binary
+*.aac binary
+*.m4a binary

@@ -11,9 +11,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
-        .package(url: "https://github.com/AudioKit/AudioKit.git", from: "5.6.0"),
-        .package(url: "https://github.com/markiv/SwiftUI-Shimmer.git", from: "1.5.1"),
-        .package(url: "https://github.com/ml-explore/mlx-swift.git", branch: "main")
+        .package(url: "https://github.com/markiv/SwiftUI-Shimmer.git", from: "1.5.1")
     ],
     targets: [
         .executableTarget(

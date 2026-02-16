@@ -10,11 +10,40 @@ enum AudioExportFormat: String, CaseIterable, Identifiable, Codable {
 
     var id: String { rawValue }
     var fileExtension: String { rawValue }
+
+    var audioFormatID: AudioFormatID {
+        switch self {
+        case .wav: return kAudioFormatLinearPCM
+        case .flac: return kAudioFormatFLAC
+        case .mp3: return kAudioFormatMPEGLayer3
+        case .aac: return kAudioFormatMPEG4AAC
+        case .alac: return kAudioFormatAppleLossless
+        }
+    }
+
+    var fileType: AudioFileTypeID {
+        switch self {
+        case .wav: return kAudioFileWAVEType
+        case .flac: return kAudioFileFLACType
+        case .mp3: return kAudioFileMP3Type
+        case .aac: return kAudioFileM4AType
+        case .alac: return kAudioFileM4AType
+        }
+    }
 }
 
-enum AudioExportError: Error {
+enum AudioExportError: Error, LocalizedError {
     case invalidSource
     case unsupported
+    case transcodingFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidSource: return "Source audio file not found."
+        case .unsupported: return "Export format is not supported on this system."
+        case .transcodingFailed(let reason): return "Transcoding failed: \(reason)"
+        }
+    }
 }
 
 struct AudioExportConfiguration: Codable, Sendable {
@@ -25,7 +54,7 @@ struct AudioExportConfiguration: Codable, Sendable {
 }
 
 final class AudioExportService {
-    func export(sourceURL: URL, destinationDirectory: URL, configuration: AudioExportConfiguration) throws -> URL {
+    func export(sourceURL: URL, destinationDirectory: URL, configuration: AudioExportConfiguration) async throws -> URL {
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
             throw AudioExportError.invalidSource
         }
@@ -37,18 +66,154 @@ final class AudioExportService {
         case .wav:
             try copyFile(from: sourceURL, to: destination)
             return destination
-        case .flac, .mp3, .aac, .alac:
-            // Phase 1 placeholder: writes source audio with target extension.
-            // Dedicated transcoding is implemented in later phases.
-            try copyFile(from: sourceURL, to: destination)
-            return destination
+        case .flac, .alac:
+            return try await transcode(
+                source: sourceURL,
+                destination: destination,
+                format: configuration.format,
+                sampleRate: configuration.sampleRate,
+                bitDepth: 16
+            )
+        case .aac:
+            return try await transcode(
+                source: sourceURL,
+                destination: destination,
+                format: configuration.format,
+                sampleRate: configuration.sampleRate,
+                bitRate: 256_000
+            )
+        case .mp3:
+            return try await transcode(
+                source: sourceURL,
+                destination: destination,
+                format: configuration.format,
+                sampleRate: configuration.sampleRate,
+                bitRate: 320_000
+            )
+        }
+    }
+
+    private func transcode(
+        source: URL,
+        destination: URL,
+        format: AudioExportFormat,
+        sampleRate: Double,
+        bitDepth: UInt32 = 16,
+        bitRate: Int? = nil
+    ) async throws -> URL {
+        let sourceFile = try AVAudioFile(forReading: source)
+        let sourceFormat = sourceFile.processingFormat
+
+        let channelCount = sourceFormat.channelCount
+        let outputSampleRate = sampleRate > 0 ? sampleRate : sourceFormat.sampleRate
+
+        var outputSettings: [String: Any] = [
+            AVFormatIDKey: format.audioFormatID,
+            AVSampleRateKey: outputSampleRate,
+            AVNumberOfChannelsKey: channelCount,
+        ]
+
+        switch format {
+        case .wav:
+            outputSettings[AVLinearPCMBitDepthKey] = bitDepth
+            outputSettings[AVLinearPCMIsFloatKey] = false
+            outputSettings[AVLinearPCMIsBigEndianKey] = false
+            outputSettings[AVLinearPCMIsNonInterleaved] = false
+        case .flac:
+            break
+        case .alac:
+            outputSettings[AVEncoderBitDepthHintKey] = bitDepth
+        case .aac:
+            if let bitRate {
+                outputSettings[AVEncoderBitRateKey] = bitRate
+            }
+            outputSettings[AVEncoderAudioQualityKey] = AVAudioQuality.max.rawValue
+        case .mp3:
+            if let bitRate {
+                outputSettings[AVEncoderBitRateKey] = bitRate
+            }
+            outputSettings[AVEncoderAudioQualityKey] = AVAudioQuality.max.rawValue
+        }
+
+        removeExistingFile(at: destination)
+
+        guard let outputFormatDescription = AVAudioFormat(settings: outputSettings) else {
+            throw AudioExportError.transcodingFailed("Cannot create output audio format")
+        }
+
+        let asset = AVURLAsset(url: source)
+        guard let assetReader = try? AVAssetReader(asset: asset) else {
+            throw AudioExportError.transcodingFailed("Cannot create asset reader")
+        }
+
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        guard let audioTrack = audioTracks.first else {
+            throw AudioExportError.transcodingFailed("No audio track in source file")
+        }
+
+        let readerOutputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: outputSampleRate,
+            AVNumberOfChannelsKey: channelCount,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+
+        let readerOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: readerOutputSettings)
+        assetReader.add(readerOutput)
+
+        guard let assetWriter = try? AVAssetWriter(outputURL: destination, fileType: avFileType(for: format)) else {
+            throw AudioExportError.transcodingFailed("Cannot create asset writer")
+        }
+
+        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: outputSettings, sourceFormatHint: outputFormatDescription.formatDescription)
+        assetWriter.add(writerInput)
+
+        assetReader.startReading()
+        assetWriter.startWriting()
+        assetWriter.startSession(atSourceTime: .zero)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            writerInput.requestMediaDataWhenReady(on: DispatchQueue(label: "com.auralux.export")) {
+                while writerInput.isReadyForMoreMediaData {
+                    if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                        writerInput.append(sampleBuffer)
+                    } else {
+                        writerInput.markAsFinished()
+                        assetWriter.finishWriting {
+                            if assetWriter.status == .completed {
+                                continuation.resume(returning: destination)
+                            } else {
+                                let msg = assetWriter.error?.localizedDescription ?? "Unknown writer error"
+                                continuation.resume(throwing: AudioExportError.transcodingFailed(msg))
+                            }
+                        }
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    private func avFileType(for format: AudioExportFormat) -> AVFileType {
+        switch format {
+        case .wav: return .wav
+        case .flac: return .flac
+        case .mp3: return .mp3
+        case .aac: return .m4a
+        case .alac: return .m4a
         }
     }
 
     private func copyFile(from source: URL, to destination: URL) throws {
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
+        removeExistingFile(at: destination)
         try FileManager.default.copyItem(at: source, to: destination)
+    }
+
+    private func removeExistingFile(at url: URL) {
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 }

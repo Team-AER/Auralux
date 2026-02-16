@@ -1,10 +1,23 @@
 .DS_Store
 .build/
 .swiftpm/
-Package.resolved
 DerivedData/
-*.xcworkspace
-xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcuserdatad/
+*.xcuserstate
 *.swp
+
+# Runtime/editor noise
+*.log
+.vscode/
+.idea/
+.env
+.env.*
+
+# Python runtime for local engine
 AuraluxEngine/.venv/
 AuraluxEngine/__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/

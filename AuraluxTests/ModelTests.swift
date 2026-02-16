@@ -2,6 +2,9 @@ import XCTest
 @testable import Auralux
 
 final class ModelTests: XCTestCase {
+
+    // MARK: - GenerationParameters
+
     func testGenerationParametersCodableRoundTrip() throws {
         let params = GenerationParameters(
             prompt: "ambient piano",
@@ -15,5 +18,158 @@ final class ModelTests: XCTestCase {
         let data = try JSONEncoder().encode(params)
         let decoded = try JSONDecoder().decode(GenerationParameters.self, from: data)
         XCTAssertEqual(params, decoded)
+    }
+
+    func testGenerationParametersDefaultValues() {
+        let defaults = GenerationParameters.default
+        XCTAssertEqual(defaults.prompt, "")
+        XCTAssertEqual(defaults.lyrics, "")
+        XCTAssertTrue(defaults.tags.isEmpty)
+        XCTAssertEqual(defaults.duration, 30)
+        XCTAssertEqual(defaults.variance, 0.5)
+        XCTAssertNil(defaults.seed)
+    }
+
+    func testGenerationParametersNilSeedEncoding() throws {
+        let params = GenerationParameters(prompt: "test", lyrics: "", tags: [], duration: 10, variance: 0.5, seed: nil)
+        let data = try JSONEncoder().encode(params)
+        let decoded = try JSONDecoder().decode(GenerationParameters.self, from: data)
+        XCTAssertNil(decoded.seed)
+    }
+
+    func testGenerationParametersHashable() {
+        let a = GenerationParameters(prompt: "x", lyrics: "", tags: ["a"], duration: 30, variance: 0.5, seed: 1)
+        let b = GenerationParameters(prompt: "x", lyrics: "", tags: ["a"], duration: 30, variance: 0.5, seed: 1)
+        let c = GenerationParameters(prompt: "y", lyrics: "", tags: ["a"], duration: 30, variance: 0.5, seed: 1)
+        XCTAssertEqual(a, b)
+        XCTAssertNotEqual(a, c)
+        XCTAssertEqual(a.hashValue, b.hashValue)
+    }
+
+    // MARK: - GeneratedTrack
+
+    func testGeneratedTrackDefaultValues() {
+        let track = GeneratedTrack(
+            title: "Test",
+            prompt: "ambient",
+            lyrics: "",
+            tags: ["ambient"],
+            duration: 30,
+            variance: 0.5,
+            seed: nil,
+            generationID: "abc-123"
+        )
+
+        XCTAssertEqual(track.title, "Test")
+        XCTAssertEqual(track.format, "wav")
+        XCTAssertFalse(track.isFavorite)
+        XCTAssertNil(track.audioFilePath)
+        XCTAssertNotNil(track.createdAt)
+    }
+
+    func testGeneratedTrackCustomFormat() {
+        let track = GeneratedTrack(
+            title: "Song",
+            prompt: "rock",
+            lyrics: "[chorus]",
+            tags: ["rock"],
+            duration: 60,
+            variance: 0.8,
+            seed: 42,
+            generationID: "def-456",
+            audioFilePath: "/tmp/test.flac",
+            format: "flac",
+            isFavorite: true
+        )
+
+        XCTAssertEqual(track.format, "flac")
+        XCTAssertTrue(track.isFavorite)
+        XCTAssertEqual(track.audioFilePath, "/tmp/test.flac")
+        XCTAssertEqual(track.seed, 42)
+    }
+
+    // MARK: - Preset
+
+    func testPresetParametersComputed() {
+        let preset = Preset(
+            name: "Lo-Fi",
+            summary: "Chill beats",
+            prompt: "lofi hip hop",
+            lyricTemplate: "[verse]\nRelax...",
+            tags: ["lofi", "chill"],
+            duration: 45,
+            variance: 0.3
+        )
+
+        let params = preset.parameters
+        XCTAssertEqual(params.prompt, "lofi hip hop")
+        XCTAssertEqual(params.lyrics, "[verse]\nRelax...")
+        XCTAssertEqual(params.tags, ["lofi", "chill"])
+        XCTAssertEqual(params.duration, 45)
+        XCTAssertEqual(params.variance, 0.3)
+        XCTAssertNil(params.seed)
+    }
+
+    // MARK: - Tag
+
+    func testTagDefaultCategory() {
+        let tag = Tag(name: "ambient")
+        XCTAssertEqual(tag.category, "custom")
+        XCTAssertEqual(tag.name, "ambient")
+    }
+
+    func testTagCustomCategory() {
+        let tag = Tag(name: "piano", category: "instrument")
+        XCTAssertEqual(tag.category, "instrument")
+    }
+
+    // MARK: - AudioExportFormat
+
+    func testAudioExportFormatFileExtension() {
+        XCTAssertEqual(AudioExportFormat.wav.fileExtension, "wav")
+        XCTAssertEqual(AudioExportFormat.flac.fileExtension, "flac")
+        XCTAssertEqual(AudioExportFormat.mp3.fileExtension, "mp3")
+        XCTAssertEqual(AudioExportFormat.aac.fileExtension, "aac")
+        XCTAssertEqual(AudioExportFormat.alac.fileExtension, "alac")
+    }
+
+    func testAudioExportFormatCodable() throws {
+        let config = AudioExportConfiguration(
+            format: .flac,
+            sampleRate: 48000,
+            title: "My Track",
+            tags: ["ambient"]
+        )
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(AudioExportConfiguration.self, from: data)
+        XCTAssertEqual(decoded.format, .flac)
+        XCTAssertEqual(decoded.sampleRate, 48000)
+        XCTAssertEqual(decoded.title, "My Track")
+    }
+
+    // MARK: - ModelArtifact
+
+    func testModelArtifactIdentifiable() {
+        let artifact = ModelArtifact(
+            name: "model-fp16.safetensors",
+            downloadURL: URL(string: "https://example.com/model")!,
+            sha256: "abc123",
+            sizeBytes: 7_000_000_000
+        )
+        XCTAssertEqual(artifact.id, "model-fp16.safetensors")
+    }
+
+    func testModelArtifactCodable() throws {
+        let artifact = ModelArtifact(
+            name: "model.bin",
+            downloadURL: URL(string: "https://example.com/model.bin")!,
+            sha256: "deadbeef",
+            sizeBytes: 1024
+        )
+        let data = try JSONEncoder().encode(artifact)
+        let decoded = try JSONDecoder().decode(ModelArtifact.self, from: data)
+        XCTAssertEqual(decoded.name, artifact.name)
+        XCTAssertEqual(decoded.sha256, artifact.sha256)
+        XCTAssertEqual(decoded.sizeBytes, artifact.sizeBytes)
     }
 }

@@ -1,8 +1,12 @@
+import SwiftData
 import XCTest
 @testable import Auralux
 
 @MainActor
 final class ViewModelTests: XCTestCase {
+
+    // MARK: - GenerationViewModel Tags
+
     func testGenerationViewModelTagMutations() {
         let viewModel = GenerationViewModel(inferenceService: InferenceService())
 
@@ -15,6 +19,22 @@ final class ViewModelTests: XCTestCase {
         viewModel.removeTag("ambient")
         XCTAssertEqual(viewModel.tags, ["piano"])
     }
+
+    func testAddEmptyTagIsIgnored() {
+        let viewModel = GenerationViewModel(inferenceService: InferenceService())
+        viewModel.addTag("")
+        viewModel.addTag("   ")
+        XCTAssertTrue(viewModel.tags.isEmpty)
+    }
+
+    func testRemoveNonexistentTagDoesNothing() {
+        let viewModel = GenerationViewModel(inferenceService: InferenceService())
+        viewModel.addTag("rock")
+        viewModel.removeTag("jazz")
+        XCTAssertEqual(viewModel.tags, ["rock"])
+    }
+
+    // MARK: - GenerationViewModel Preset
 
     func testApplyingPresetUpdatesParameters() {
         let viewModel = GenerationViewModel(inferenceService: InferenceService())
@@ -35,5 +55,144 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.tags, ["a", "b"])
         XCTAssertEqual(viewModel.duration, 55)
         XCTAssertEqual(viewModel.variance, 0.66)
+    }
+
+    // MARK: - GenerationViewModel State
+
+    func testInitialStateIsIdle() {
+        let viewModel = GenerationViewModel(inferenceService: InferenceService())
+        XCTAssertEqual(viewModel.state, .idle)
+        XCTAssertEqual(viewModel.progress, 0)
+        XCTAssertNil(viewModel.currentJobID)
+        XCTAssertNil(viewModel.lastTrack)
+    }
+
+    func testGenerateWithEmptyPromptFails() {
+        let viewModel = GenerationViewModel(inferenceService: InferenceService())
+        viewModel.prompt = "   "
+
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let container = try! ModelContainer(for: GeneratedTrack.self, Preset.self, Tag.self, configurations: config)
+        viewModel.generate(in: container.mainContext)
+
+        XCTAssertEqual(viewModel.state, .failed("Prompt is required."))
+    }
+
+    func testCancelResetsState() {
+        let viewModel = GenerationViewModel(inferenceService: InferenceService())
+        viewModel.prompt = "test song"
+        viewModel.cancel()
+
+        XCTAssertEqual(viewModel.state, .idle)
+        XCTAssertEqual(viewModel.progress, 0)
+        XCTAssertNil(viewModel.currentJobID)
+    }
+
+    // MARK: - GenerationState
+
+    func testGenerationStateIsBusy() {
+        XCTAssertFalse(GenerationState.idle.isBusy)
+        XCTAssertTrue(GenerationState.preparing.isBusy)
+        XCTAssertTrue(GenerationState.generating.isBusy)
+        XCTAssertFalse(GenerationState.completed.isBusy)
+        XCTAssertFalse(GenerationState.failed("error").isBusy)
+    }
+
+    // MARK: - SettingsViewModel
+
+    func testSettingsDefaultValues() {
+        let defaults = UserDefaults(suiteName: "test-\(UUID().uuidString)")!
+        let vm = SettingsViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm.quantizationMode, .fp16)
+        XCTAssertFalse(vm.lowMemoryMode)
+        XCTAssertTrue(vm.autoStartServer)
+        XCTAssertEqual(vm.maxConcurrentJobs, 1)
+        XCTAssertEqual(vm.defaultExportFormat, .wav)
+    }
+
+    func testSettingsPersistenceRoundTrip() {
+        let suiteName = "test-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+
+        let vm1 = SettingsViewModel(defaults: defaults)
+        vm1.quantizationMode = .int8
+        vm1.lowMemoryMode = true
+        vm1.autoStartServer = false
+        vm1.maxConcurrentJobs = 3
+        vm1.defaultExportFormat = .flac
+
+        let vm2 = SettingsViewModel(defaults: defaults)
+        XCTAssertEqual(vm2.quantizationMode, .int8)
+        XCTAssertTrue(vm2.lowMemoryMode)
+        XCTAssertFalse(vm2.autoStartServer)
+        XCTAssertEqual(vm2.maxConcurrentJobs, 3)
+        XCTAssertEqual(vm2.defaultExportFormat, .flac)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testSettingsMaxConcurrentJobsClamped() {
+        let defaults = UserDefaults(suiteName: "test-\(UUID().uuidString)")!
+        let vm = SettingsViewModel(defaults: defaults)
+
+        vm.maxConcurrentJobs = 10
+        XCTAssertEqual(vm.maxConcurrentJobs, 4)
+
+        vm.maxConcurrentJobs = 0
+        XCTAssertEqual(vm.maxConcurrentJobs, 1)
+    }
+
+    func testSettingsResetToDefaults() {
+        let defaults = UserDefaults(suiteName: "test-\(UUID().uuidString)")!
+        let vm = SettingsViewModel(defaults: defaults)
+        vm.quantizationMode = .int8
+        vm.lowMemoryMode = true
+        vm.maxConcurrentJobs = 4
+
+        vm.resetToDefaults()
+
+        XCTAssertEqual(vm.quantizationMode, .fp16)
+        XCTAssertFalse(vm.lowMemoryMode)
+        XCTAssertEqual(vm.maxConcurrentJobs, 1)
+    }
+
+    // MARK: - PlayerViewModel
+
+    func testPlayerViewModelInitialState() {
+        let vm = PlayerViewModel()
+        XCTAssertNil(vm.loadedPath)
+        XCTAssertNil(vm.errorMessage)
+        XCTAssertFalse(vm.isPlaying)
+        XCTAssertEqual(vm.progress, 0)
+        XCTAssertTrue(vm.waveformSamples.isEmpty)
+    }
+
+    func testPlayerViewModelLoadInvalidPath() {
+        let vm = PlayerViewModel()
+        vm.load(path: "/nonexistent/audio.wav")
+        XCTAssertNotNil(vm.errorMessage)
+    }
+
+    func testPlayerViewModelLoadNilPath() {
+        let vm = PlayerViewModel()
+        vm.load(path: nil)
+        XCTAssertNil(vm.loadedPath)
+        XCTAssertNil(vm.errorMessage)
+    }
+
+    func testPlayerViewModelClearError() {
+        let vm = PlayerViewModel()
+        vm.load(path: "/nonexistent/audio.wav")
+        XCTAssertNotNil(vm.errorMessage)
+        vm.clearError()
+        XCTAssertNil(vm.errorMessage)
+    }
+
+    // MARK: - SidebarViewModel
+
+    func testSidebarViewModelDefaultSection() {
+        let vm = SidebarViewModel()
+        XCTAssertEqual(vm.selectedSection, .generate)
     }
 }

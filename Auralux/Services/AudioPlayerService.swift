@@ -15,19 +15,41 @@ final class AudioPlayerService {
         }
     }
 
+    /// Latest FFT magnitude data (updated ~20 times/sec while playing).
+    var spectrumMagnitudes: [Float] = []
+
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private var audioFile: AVAudioFile?
     private var progressTask: Task<Void, Never>?
+    private let fftSize: Int = 1024
 
     init() {
         engine.attach(playerNode)
         engine.connect(playerNode, to: engine.mainMixerNode, format: nil)
+        installFFTTap()
 
         do {
             try engine.start()
         } catch {
             NSLog("Audio engine failed to start: \(error)")
+        }
+    }
+
+    private func installFFTTap() {
+        let mixerNode = engine.mainMixerNode
+        let bufferSize = AVAudioFrameCount(fftSize)
+        let format = mixerNode.outputFormat(forBus: 0)
+        guard format.sampleRate > 0 else { return }
+
+        mixerNode.installTap(onBus: 0, bufferSize: bufferSize, format: format) { [weak self] buffer, _ in
+            guard let self, let channelData = buffer.floatChannelData?[0] else { return }
+            let frameLength = Int(buffer.frameLength)
+            let samples = Array(UnsafeBufferPointer(start: channelData, count: frameLength))
+            let mags = AudioFFT.magnitudes(samples: samples, fftSize: self.fftSize)
+            Task { @MainActor in
+                self.spectrumMagnitudes = mags
+            }
         }
     }
 
@@ -63,6 +85,43 @@ final class AudioPlayerService {
         progressTask?.cancel()
         progressTask = nil
         scheduleFile()
+    }
+
+    func seek(to time: TimeInterval) {
+        guard let audioFile else { return }
+        let wasPlaying = isPlaying
+        playerNode.stop()
+
+        let sampleRate = audioFile.processingFormat.sampleRate
+        let targetFrame = AVAudioFramePosition(time * sampleRate)
+        let totalFrames = AVAudioFramePosition(audioFile.length)
+        let clampedFrame = max(0, min(targetFrame, totalFrames))
+        let remainingFrames = AVAudioFrameCount(totalFrames - clampedFrame)
+
+        guard remainingFrames > 0 else {
+            currentTime = duration
+            isPlaying = false
+            return
+        }
+
+        playerNode.scheduleSegment(audioFile, startingFrame: clampedFrame, frameCount: remainingFrames, at: nil) { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                self.isPlaying = false
+                self.currentTime = 0
+                if self.isLooping {
+                    self.scheduleFile()
+                    self.play()
+                }
+            }
+        }
+
+        currentTime = time
+        if wasPlaying {
+            playerNode.play()
+            isPlaying = true
+            startProgressUpdates()
+        }
     }
 
     private func scheduleFile() {

@@ -14,14 +14,27 @@ struct PlayerView: View {
                     .foregroundStyle(.secondary)
             }
 
-            WaveformView(progress: progress)
-                .frame(height: 120)
+            if let error = viewModel.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .font(.callout)
+            }
 
-            SpectrumAnalyzerView()
-                .frame(height: 90)
+            WaveformView(
+                progress: viewModel.progress,
+                samples: viewModel.waveformSamples,
+                onSeek: { fraction in viewModel.seek(to: fraction) }
+            )
+            .frame(height: 120)
+
+            SpectrumAnalyzerView(
+                magnitudes: viewModel.playerService.spectrumMagnitudes,
+                isPlaying: viewModel.isPlaying
+            )
+            .frame(height: 90)
 
             HStack(spacing: 12) {
-                Button(viewModel.playerService.isPlaying ? "Pause" : "Play") {
+                Button(viewModel.isPlaying ? "Pause" : "Play") {
                     viewModel.playPause()
                 }
                 .keyboardShortcut(.space, modifiers: [])
@@ -30,7 +43,8 @@ struct PlayerView: View {
                     viewModel.stop()
                 }
 
-                Toggle("Loop", isOn: Bindable(viewModel.playerService).isLooping)
+                @Bindable var vm = viewModel
+                Toggle("Loop", isOn: $vm.isLooping)
                     .toggleStyle(.switch)
                     .frame(width: 110)
 
@@ -52,14 +66,9 @@ struct PlayerView: View {
         }
     }
 
-    private var progress: Double {
-        guard viewModel.playerService.duration > 0 else { return 0 }
-        return viewModel.playerService.currentTime / viewModel.playerService.duration
-    }
-
     private var timecode: String {
-        let current = Int(viewModel.playerService.currentTime)
-        let total = Int(viewModel.playerService.duration)
+        let current = Int(viewModel.currentTime)
+        let total = Int(viewModel.duration)
         return "\(format(seconds: current)) / \(format(seconds: total))"
     }
 
