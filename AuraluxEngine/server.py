@@ -86,6 +86,54 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Monkey-patch: inference_mode → no_grad on MPS
+# ---------------------------------------------------------------------------
+# On MPS, torch.inference_mode() marks intermediate tensors as read-only.
+# Several Metal compute shaders (mul_dense_scalar_float_float,
+# masked_fill_scalar_strided_32bit, etc.) then crash with a fatal
+# assertion because they try to bind those read-only buffers to
+# write-enabled shader arguments.
+#
+# torch.no_grad() provides identical semantics for pure inference but does
+# NOT mark tensors as read-only, neatly side-stepping the issue.  This
+# global replacement is applied only when MPS is available.
+try:
+    import functools as _functools
+    import torch as _torch_im
+
+    if hasattr(_torch_im.backends, "mps") and _torch_im.backends.mps.is_available():
+        _orig_inference_mode = _torch_im.inference_mode
+
+        class _NoGradInferenceMode:
+            """Drop-in torch.inference_mode replacement using no_grad."""
+
+            def __init__(self, mode=True):
+                self._inner = (
+                    _torch_im.no_grad()
+                    if mode
+                    else _orig_inference_mode(mode=False)
+                )
+
+            def __enter__(self):
+                return self._inner.__enter__()
+
+            def __exit__(self, *args):
+                return self._inner.__exit__(*args)
+
+            def __call__(self, fn):
+                @_functools.wraps(fn)
+                def wrapper(*args, **kwargs):
+                    with self:
+                        return fn(*args, **kwargs)
+                return wrapper
+
+        _torch_im.inference_mode = _NoGradInferenceMode
+        log.info("Replaced torch.inference_mode with no_grad wrapper for MPS safety")
+except ImportError:
+    pass
+
+
+# ---------------------------------------------------------------------------
 # Monkey-patch: audio-code decoding on MPS
 # ---------------------------------------------------------------------------
 # The MPS Metal shader ``mul_dense_scalar_float_float`` has a buffer-binding
@@ -213,6 +261,98 @@ def _patch_mps_text_encoder_embed() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Monkey-patch: prepare_condition (DiT condition encoder) on MPS
+# ---------------------------------------------------------------------------
+# The DiT condition encoder (AceStepConditionEncoder) contains transformer
+# layers whose attention-scaling scalar multiplications trigger the same
+# ``mul_dense_scalar_float_float`` Metal shader fatal assertion.  The bug
+# originates from MPS allocating model-parameter Metal buffers as read-only.
+#
+# Because this is a device-level buffer property (not caused by
+# inference_mode), the only reliable fix is to run the encoder on CPU.
+# We move only the sub-modules used by prepare_condition (encoder,
+# tokenizer, detokenizer) — NOT the large DiT decoder — so the overhead
+# is small, especially on Apple Silicon unified memory.
+#
+# IMPORTANT: The model is loaded via AutoModel.from_pretrained with
+# trust_remote_code=True, which dynamically creates the class from the
+# checkpoint directory.  This means the class object is DIFFERENT from the
+# one importable via ``acestep.models.turbo.modeling_acestep_v15_turbo``.
+# We must therefore patch the actual class of the loaded model instance,
+# not the package-level import.
+
+def _patch_mps_prepare_condition(model_instance) -> None:
+    """Run prepare_condition on CPU to avoid MPS Metal shader bugs.
+
+    Must be called AFTER the model is loaded so we patch the correct
+    (dynamically-created) class, not the package-level import.
+    """
+    try:
+        import torch
+    except ImportError:
+        return
+
+    if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+        return
+
+    model_cls = model_instance.__class__
+    _orig = model_cls.prepare_condition
+
+    def _cpu_safe_prepare_condition(self, *args, **kwargs):
+        mps_device = None
+        for a in args:
+            if isinstance(a, torch.Tensor) and a.device.type == "mps":
+                mps_device = a.device
+                break
+        if mps_device is None:
+            for v in kwargs.values():
+                if isinstance(v, torch.Tensor) and v.device.type == "mps":
+                    mps_device = v.device
+                    break
+        if mps_device is None:
+            return _orig(self, *args, **kwargs)
+
+        modules = [self.encoder]
+        for attr in ("tokenizer", "detokenizer"):
+            mod = getattr(self, attr, None)
+            if mod is not None:
+                modules.append(mod)
+
+        for m in modules:
+            m.cpu()
+
+        cpu_args = tuple(
+            a.cpu() if isinstance(a, torch.Tensor) else a for a in args
+        )
+        cpu_kwargs = {
+            k: v.cpu() if isinstance(v, torch.Tensor) else v
+            for k, v in kwargs.items()
+        }
+
+        try:
+            result = _orig(self, *cpu_args, **cpu_kwargs)
+            if isinstance(result, tuple):
+                return tuple(
+                    r.to(mps_device) if isinstance(r, torch.Tensor) else r
+                    for r in result
+                )
+            return (
+                result.to(mps_device)
+                if isinstance(result, torch.Tensor)
+                else result
+            )
+        finally:
+            for m in modules:
+                m.to(mps_device)
+
+    model_cls.prepare_condition = _cpu_safe_prepare_condition
+    log.info(
+        "Patched %s.prepare_condition for MPS safety (CPU fallback)",
+        model_cls.__name__,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Paths – resolve the cloned ACE-Step 1.5 repo so we can import `acestep`
 # ---------------------------------------------------------------------------
 
@@ -272,6 +412,13 @@ def _ensure_initialized() -> bool:
             if not ok:
                 raise RuntimeError(f"DiT init failed: {status_msg}")
             log.info("DiT handler ready: %s", status_msg)
+
+            # Patch prepare_condition on the ACTUAL model instance.
+            # The model class is dynamically created by AutoModel.from_pretrained
+            # with trust_remote_code=True, so we must patch after loading.
+            if dit.model is not None:
+                _patch_mps_prepare_condition(dit.model)
+
             _dit_handler = dit
 
             # --- LLM handler (optional, best-effort) ---
