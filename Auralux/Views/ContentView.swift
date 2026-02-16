@@ -15,10 +15,12 @@ struct ContentView: View {
             mainContent
 
             if engineService.isOnboarding {
-                SetupView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(.background)
+                Color.black.opacity(0.3)
+                    .ignoresSafeArea()
                     .transition(.opacity)
+
+                SetupView()
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
             }
         }
         .task {

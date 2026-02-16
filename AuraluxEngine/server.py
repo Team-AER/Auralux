@@ -154,6 +154,65 @@ def _patch_mps_audio_code_decode() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Monkey-patch: text-encoder embeddings on MPS
+# ---------------------------------------------------------------------------
+# The same ``mul_dense_scalar_float_float`` Metal shader bug that affects
+# audio-code decoding also triggers during the text-encoder forward pass
+# inside ``infer_text_embeddings`` and ``infer_lyric_embeddings``
+# (ConditioningEmbedMixin).  The call runs under torch.inference_mode()
+# which marks tensors read-only, and the Metal shader then tries to bind
+# a read-only buffer to a write-enabled argument — causing a fatal process
+# crash.
+#
+# The fix temporarily moves the text encoder to CPU for the forward pass,
+# then puts it back on MPS.  The text encoder is small (0.6B) so the
+# performance impact is minimal.
+
+def _patch_mps_text_encoder_embed() -> None:
+    """Replace infer_text_embeddings / infer_lyric_embeddings with CPU-safe variants."""
+    try:
+        import torch
+        from acestep.core.generation.handler.conditioning_embed import ConditioningEmbedMixin
+    except ImportError:
+        return
+
+    _orig_infer_text = ConditioningEmbedMixin.infer_text_embeddings
+    _orig_infer_lyric = ConditioningEmbedMixin.infer_lyric_embeddings
+
+    def _cpu_safe_infer_text(self, text_token_idss):
+        if not hasattr(self, "device") or str(self.device).split(":")[0] != "mps":
+            return _orig_infer_text(self, text_token_idss)
+
+        mps_dev = self.device
+        self.text_encoder.cpu()
+        try:
+            cpu_ids = text_token_idss.cpu() if hasattr(text_token_idss, "cpu") else text_token_idss
+            with torch.inference_mode():
+                result = self.text_encoder(input_ids=cpu_ids, lyric_attention_mask=None).last_hidden_state
+            return result.to(mps_dev)
+        finally:
+            self.text_encoder.to(mps_dev)
+
+    def _cpu_safe_infer_lyric(self, lyric_token_ids):
+        if not hasattr(self, "device") or str(self.device).split(":")[0] != "mps":
+            return _orig_infer_lyric(self, lyric_token_ids)
+
+        mps_dev = self.device
+        self.text_encoder.cpu()
+        try:
+            cpu_ids = lyric_token_ids.cpu() if hasattr(lyric_token_ids, "cpu") else lyric_token_ids
+            with torch.inference_mode():
+                result = self.text_encoder.embed_tokens(cpu_ids)
+            return result.to(mps_dev)
+        finally:
+            self.text_encoder.to(mps_dev)
+
+    ConditioningEmbedMixin.infer_text_embeddings = _cpu_safe_infer_text
+    ConditioningEmbedMixin.infer_lyric_embeddings = _cpu_safe_infer_lyric
+    log.info("Patched infer_text_embeddings/infer_lyric_embeddings for MPS safety (CPU fallback)")
+
+
+# ---------------------------------------------------------------------------
 # Paths – resolve the cloned ACE-Step 1.5 repo so we can import `acestep`
 # ---------------------------------------------------------------------------
 
@@ -192,6 +251,7 @@ def _ensure_initialized() -> bool:
             from acestep.llm_inference import LLMHandler
 
             _patch_mps_audio_code_decode()
+            _patch_mps_text_encoder_embed()
 
             project_root = str(ACE_STEP_DIR)
             os.makedirs(str(CHECKPOINTS_DIR), exist_ok=True)

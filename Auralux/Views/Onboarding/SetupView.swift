@@ -1,543 +1,305 @@
 import SwiftUI
 
-/// The first-run setup experience that guides users through engine configuration.
+/// Compact glass overlay that auto-advances through engine setup steps.
 /// Shown automatically when the engine is not ready.
 struct SetupView: View {
     @Environment(EngineService.self) private var engine
 
-    @State private var currentStep: SetupStep = .welcome
-    @State private var showLog = false
-    @State private var isRunningSetup = false
-    @State private var showDirectoryPicker = false
-
-    enum SetupStep: Int, CaseIterable {
-        case welcome
-        case systemCheck
-        case environmentSetup
-        case serverStart
-        case ready
-    }
+    @State private var stepStatuses: [Step: StepStatus] = Step.allCases.reduce(into: [:]) { $0[$1] = .pending }
+    @State private var activeStep: Step?
+    @State private var detailText = ""
+    @State private var hasError = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             header
+                .padding(.top, 24)
+                .padding(.bottom, 16)
 
-            Divider()
+            Divider().opacity(0.3)
 
-            // Content
-            ScrollView {
-                VStack(spacing: 24) {
-                    stepContent
-                }
-                .padding(40)
-                .frame(maxWidth: 600)
+            stepList
+                .padding(.horizontal, 28)
+                .padding(.vertical, 20)
+
+            if !detailText.isEmpty {
+                Text(detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 16)
+                    .transition(.opacity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Divider()
+            Divider().opacity(0.3)
 
-            // Footer
             footer
+                .padding(.horizontal, 24)
+                .padding(.vertical, 12)
         }
-        .frame(minWidth: 700, minHeight: 500)
+        .frame(width: 380)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.15), radius: 24, y: 8)
         .task {
-            await evaluateInitialStep()
+            await runAllSteps()
+        }
+        .onChange(of: engine.state) { _, newState in
+            updateDetailText(for: newState)
         }
     }
 
-    // MARK: - Header
+    // MARK: - Subviews
 
     private var header: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             Image(systemName: "wand.and.stars")
-                .font(.system(size: 48))
+                .font(.system(size: 32))
                 .foregroundStyle(.tint)
-                .padding(.top, 24)
 
-            Text("Auralux")
-                .font(.largeTitle.bold())
+            Text("Setting Up Auralux")
+                .font(.headline)
 
             Text("AI Music Generation on Apple Silicon")
-                .font(.title3)
+                .font(.caption)
                 .foregroundStyle(.secondary)
-
-            // Progress indicators
-            HStack(spacing: 12) {
-                ForEach(SetupStep.allCases, id: \.rawValue) { step in
-                    stepIndicator(step)
-                }
-            }
-            .padding(.top, 8)
-            .padding(.bottom, 16)
         }
     }
 
-    @ViewBuilder
-    private func stepIndicator(_ step: SetupStep) -> some View {
-        let isCurrent = step == currentStep
-        let isCompleted = step.rawValue < currentStep.rawValue
-
-        HStack(spacing: 4) {
-            Circle()
-                .fill(isCompleted ? Color.green : (isCurrent ? Color.accentColor : Color.secondary.opacity(0.3)))
-                .frame(width: 8, height: 8)
-
-            if isCurrent {
-                Text(step.label)
-                    .font(.caption.bold())
-                    .foregroundStyle(.primary)
+    private var stepList: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Step.allCases, id: \.rawValue) { step in
+                stepRow(step)
             }
         }
     }
 
-    // MARK: - Step Content
+    private func stepRow(_ step: Step) -> some View {
+        let status = stepStatuses[step] ?? .pending
 
-    @ViewBuilder
-    private var stepContent: some View {
-        switch currentStep {
-        case .welcome:
-            welcomeContent
-        case .systemCheck:
-            systemCheckContent
-        case .environmentSetup:
-            environmentSetupContent
-        case .serverStart:
-            serverStartContent
-        case .ready:
-            readyContent
-        }
-    }
+        return HStack(spacing: 12) {
+            statusIcon(for: status)
+                .frame(width: 20, height: 20)
 
-    // MARK: Welcome
-
-    private var welcomeContent: some View {
-        VStack(spacing: 20) {
-            VStack(spacing: 12) {
-                Text("Welcome to Auralux")
-                    .font(.title2.bold())
-
-                Text("Auralux generates music using ACE-Step v1.5, running entirely on your Mac. Let's get everything set up.")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 12) {
-                featureRow(icon: "cpu", title: "On-Device Inference", description: "All processing happens locally on Apple Silicon")
-                featureRow(icon: "waveform", title: "Text to Music", description: "Describe what you want and get audio in minutes")
-                featureRow(icon: "music.note.list", title: "Lyrics Support", description: "Generate vocal tracks with your own lyrics")
-                featureRow(icon: "square.and.arrow.down", title: "Export Anywhere", description: "Save as WAV, FLAC, MP3, AAC, or ALAC")
-            }
-            .padding(.vertical, 8)
-        }
-    }
-
-    private func featureRow(icon: String, title: String, description: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(.tint)
-                .frame(width: 32)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.body.bold())
-                Text(description)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    // MARK: System Check
-
-    private var systemCheckContent: some View {
-        VStack(spacing: 20) {
-            Text("System Requirements")
-                .font(.title2.bold())
-
-            VStack(alignment: .leading, spacing: 16) {
-                checkRow(
-                    label: "macOS 15.0 (Sequoia) or later",
-                    passed: ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15
-                )
-                checkRow(
-                    label: "Apple Silicon (M1 or later)",
-                    passed: isAppleSilicon
-                )
-                checkRow(
-                    label: "AuraluxEngine directory found",
-                    passed: engine.engineDirectory != nil
-                )
-                checkRow(
-                    label: "8 GB RAM recommended (16 GB ideal)",
-                    passed: ProcessInfo.processInfo.physicalMemory >= 8 * 1024 * 1024 * 1024,
-                    isWarning: true
-                )
-            }
-            .padding(16)
-            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
-
-            if engine.engineDirectory == nil {
-                VStack(spacing: 10) {
-                    Label("AuraluxEngine not found", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                    Text("The AuraluxEngine folder wasn't detected automatically. Use the button below to locate it, or make sure it's in your project root.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-
-                    Button("Browse for AuraluxEngine Folder...") {
-                        showDirectoryPicker = true
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .fileImporter(
-                        isPresented: $showDirectoryPicker,
-                        allowedContentTypes: [.folder],
-                        allowsMultipleSelection: false
-                    ) { result in
-                        if case .success(let urls) = result, let url = urls.first {
-                            let serverPy = url.appendingPathComponent("server.py")
-                            if FileManager.default.fileExists(atPath: serverPy.path) {
-                                UserDefaults.standard.set(url.path, forKey: "engine.directoryOverride")
-                                Task { await engine.checkStatus() }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func checkRow(label: String, passed: Bool, isWarning: Bool = false) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: passed ? "checkmark.circle.fill" : (isWarning ? "exclamationmark.triangle.fill" : "xmark.circle.fill"))
-                .foregroundStyle(passed ? .green : (isWarning ? .orange : .red))
-                .font(.title3)
-
-            Text(label)
-                .font(.body)
+            Text(step.label)
+                .font(.callout)
+                .foregroundStyle(status == .pending ? .secondary : .primary)
 
             Spacer()
-        }
-    }
 
-    private var isAppleSilicon: Bool {
-        #if arch(arm64)
-        return true
-        #else
-        return false
-        #endif
-    }
-
-    // MARK: Environment Setup
-
-    private var environmentSetupContent: some View {
-        VStack(spacing: 20) {
-            Text("Environment Setup")
-                .font(.title2.bold())
-
-            if engine.isACEStepCloned && engine.isVenvReady {
-                VStack(spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.green)
-
-                    Text("Environment is already set up!")
-                        .font(.headline)
-
-                    Text("ACE-Step 1.5 is installed and the Python environment is ready.")
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-            } else if isRunningSetup {
-                setupProgressView
-            } else {
-                VStack(spacing: 12) {
-                    Text("This will:")
-                        .font(.headline)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Clone ACE-Step 1.5 from GitHub (~100 MB)", systemImage: "arrow.down.circle")
-                        Label("Install Python dependencies via uv (~2 GB)", systemImage: "shippingbox")
-                        Label("Configure the inference environment", systemImage: "gearshape.2")
-                    }
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-
-                    Text("This may take 5-15 minutes depending on your internet connection.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 4)
-                }
-            }
-
-            if showLog && !engine.setupLog.isEmpty {
-                logView
+            if status == .completed {
+                Image(systemName: "checkmark")
+                    .font(.caption.bold())
+                    .foregroundStyle(.green)
             }
         }
     }
 
-    private var setupProgressView: some View {
-        VStack(spacing: 16) {
+    @ViewBuilder
+    private func statusIcon(for status: StepStatus) -> some View {
+        switch status {
+        case .pending:
+            Circle()
+                .stroke(Color.secondary.opacity(0.3), lineWidth: 2)
+        case .inProgress:
             ProgressView()
-                .controlSize(.large)
-
-            if case .settingUp(let progress) = engine.state {
-                Text(progress)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            Button(showLog ? "Hide Log" : "Show Log") {
-                showLog.toggle()
-            }
-            .buttonStyle(.plain)
-            .font(.caption)
-            .foregroundStyle(.tint)
-        }
-    }
-
-    private var logView: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(engine.setupLog.enumerated()), id: \.offset) { index, line in
-                        Text(line)
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .id(index)
-                    }
-                }
-                .padding(8)
-            }
-            .frame(maxHeight: 200)
-            .background(.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
-            .onChange(of: engine.setupLog.count) {
-                if let last = engine.setupLog.indices.last {
-                    proxy.scrollTo(last, anchor: .bottom)
-                }
-            }
-        }
-    }
-
-    // MARK: Server Start
-
-    private var serverStartContent: some View {
-        VStack(spacing: 20) {
-            Text("Starting Server")
-                .font(.title2.bold())
-
-            switch engine.state {
-            case .starting:
-                VStack(spacing: 16) {
-                    ProgressView()
-                        .controlSize(.large)
-                    Text("Starting the inference server...")
-                        .foregroundStyle(.secondary)
-                    Text("The first launch downloads AI models (~4 GB). This may take several minutes.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                }
-
-            case .running:
-                VStack(spacing: 12) {
-                    Image(systemName: "bolt.circle.fill")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.yellow)
-                    Text("Server is running")
-                        .font(.headline)
-                    Text("Waiting for models to load...")
-                        .foregroundStyle(.secondary)
-                }
-
-            case .ready:
-                VStack(spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.green)
-                    Text("Server is ready!")
-                        .font(.headline)
-                }
-
-            case .error(let message):
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.red)
-                    Text("Server Error")
-                        .font(.headline)
-                    Text(message)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-
-            default:
-                VStack(spacing: 12) {
-                    Text("Ready to start the inference server.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-
-    // MARK: Ready
-
-    private var readyContent: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 64))
+                .controlSize(.small)
+        case .completed:
+            Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(.green)
-
-            Text("All Set!")
-                .font(.title.bold())
-
-            Text("Auralux is ready to generate music. Write a prompt, add some tags, and hit Generate.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-
-            if engine.modelStatus.ditLoaded {
-                HStack(spacing: 16) {
-                    Label(engine.modelStatus.device, systemImage: "cpu")
-                    Label(engine.modelStatus.engine, systemImage: "waveform")
-                }
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-            }
+        case .error:
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.red)
         }
     }
-
-    // MARK: - Footer
 
     private var footer: some View {
         HStack {
-            if currentStep == .welcome {
-                Button("Skip Setup") {
-                    withAnimation { engine.isOnboarding = false }
-                }
-                .foregroundStyle(.secondary)
-                .buttonStyle(.plain)
-                .font(.callout)
-            } else {
-                Button("Back") {
-                    withAnimation {
-                        goBack()
-                    }
-                }
-                .disabled(isRunningSetup)
+            Button("Cancel") {
+                withAnimation { engine.isOnboarding = false }
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .font(.callout)
 
             Spacer()
 
-            if case .error = engine.state {
+            if hasError {
                 Button("Retry") {
-                    Task { await retryCurrentStep() }
+                    retryFromError()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
+        }
+    }
 
-            Button(currentStep == .ready ? "Get Started" : "Continue") {
-                Task {
-                    await advanceStep()
+    // MARK: - Auto-advance Logic
+
+    private func runAllSteps() async {
+        hasError = false
+
+        // Step 1: System Check
+        if stepStatuses[.systemCheck] != .completed {
+            await runStep(.systemCheck) {
+                let hasEngine = engine.engineDirectory != nil
+                #if arch(arm64)
+                let hasAppleSilicon = true
+                #else
+                let hasAppleSilicon = false
+                #endif
+
+                if !hasEngine {
+                    throw SetupError.message("AuraluxEngine directory not found.")
+                }
+                if !hasAppleSilicon {
+                    throw SetupError.message("Apple Silicon (M1 or later) is required.")
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!canAdvance)
+            guard !hasError, !Task.isCancelled else { return }
         }
-        .padding(.horizontal, 40)
-        .padding(.vertical, 16)
-    }
 
-    private var canAdvance: Bool {
-        switch currentStep {
-        case .welcome:
-            return true
-        case .systemCheck:
-            return engine.engineDirectory != nil
-        case .environmentSetup:
-            if isRunningSetup { return false }
-            return engine.isVenvReady
-        case .serverStart:
-            return engine.state.isReady || engine.state.isRunning
-        case .ready:
-            return true
-        }
-    }
-
-    // MARK: - Navigation
-
-    private func evaluateInitialStep() async {
-        if engine.state.isReady || engine.state.isRunning {
-            currentStep = .ready
-            return
-        }
-        if engine.isACEStepCloned && engine.isVenvReady {
-            currentStep = .serverStart
-            return
-        }
-        currentStep = .welcome
-    }
-
-    private func advanceStep() async {
-        switch currentStep {
-        case .welcome:
-            withAnimation { currentStep = .systemCheck }
-
-        case .systemCheck:
-            withAnimation { currentStep = .environmentSetup }
-            if !engine.isVenvReady {
-                isRunningSetup = true
-                await engine.runSetup()
-                isRunningSetup = false
+        // Step 2: Environment Setup
+        if stepStatuses[.environmentSetup] != .completed {
+            if engine.isACEStepCloned && engine.isVenvReady {
+                withAnimation { stepStatuses[.environmentSetup] = .completed }
+            } else {
+                await runStep(.environmentSetup) {
+                    await engine.runSetup()
+                    if !engine.isVenvReady {
+                        if case .error(let msg) = engine.state {
+                            throw SetupError.message(msg)
+                        }
+                        throw SetupError.message("Environment setup did not complete successfully.")
+                    }
+                }
+                guard !hasError, !Task.isCancelled else { return }
             }
+        }
 
-        case .environmentSetup:
-            withAnimation { currentStep = .serverStart }
-            if !engine.state.isRunning && !engine.state.isReady {
-                await engine.startServer()
+        // Step 3: Server Start
+        if stepStatuses[.serverStart] != .completed {
+            if engine.state.isRunning || engine.state.isReady {
+                withAnimation { stepStatuses[.serverStart] = .completed }
+            } else {
+                await runStep(.serverStart) {
+                    await engine.startServer()
+                    if !engine.state.isRunning && !engine.state.isReady {
+                        if case .error(let msg) = engine.state {
+                            throw SetupError.message(msg)
+                        }
+                        throw SetupError.message("Server failed to start.")
+                    }
+                }
+                guard !hasError, !Task.isCancelled else { return }
             }
+        }
 
-        case .serverStart:
-            withAnimation { currentStep = .ready }
-
-        case .ready:
+        // All done -- brief pause then auto-dismiss
+        withAnimation { detailText = "" }
+        try? await Task.sleep(for: .milliseconds(750))
+        if !Task.isCancelled {
             withAnimation { engine.isOnboarding = false }
         }
     }
 
-    private func goBack() {
-        if let prev = SetupStep(rawValue: currentStep.rawValue - 1) {
-            currentStep = prev
+    private func runStep(_ step: Step, action: () async throws -> Void) async {
+        withAnimation {
+            activeStep = step
+            stepStatuses[step] = .inProgress
+            detailText = ""
+        }
+
+        do {
+            try await action()
+            if !Task.isCancelled {
+                withAnimation { stepStatuses[step] = .completed }
+            }
+        } catch {
+            if !Task.isCancelled {
+                withAnimation {
+                    stepStatuses[step] = .error(error.localizedDescription)
+                    detailText = error.localizedDescription
+                }
+                hasError = true
+            }
         }
     }
 
-    private func retryCurrentStep() async {
-        switch currentStep {
+    private func retryFromError() {
+        var shouldReset = false
+        for step in Step.allCases {
+            if case .error = stepStatuses[step] {
+                shouldReset = true
+            }
+            if shouldReset {
+                stepStatuses[step] = .pending
+            }
+        }
+        hasError = false
+        detailText = ""
+        Task { await runAllSteps() }
+    }
+
+    private func updateDetailText(for newState: EngineState) {
+        guard let step = activeStep else { return }
+        switch step {
         case .environmentSetup:
-            isRunningSetup = true
-            await engine.runSetup()
-            isRunningSetup = false
+            if case .settingUp(let progress) = newState {
+                withAnimation { detailText = progress }
+            }
         case .serverStart:
-            await engine.startServer()
+            switch newState {
+            case .starting:
+                withAnimation { detailText = "Starting the inference server..." }
+            case .running:
+                withAnimation { detailText = "Server running, loading models..." }
+            default:
+                break
+            }
         default:
             break
         }
     }
 }
 
-// MARK: - SetupStep Labels
+// MARK: - Supporting Types
 
-extension SetupView.SetupStep {
-    var label: String {
-        switch self {
-        case .welcome: return "Welcome"
-        case .systemCheck: return "System"
-        case .environmentSetup: return "Setup"
-        case .serverStart: return "Server"
-        case .ready: return "Ready"
+extension SetupView {
+    enum Step: Int, CaseIterable {
+        case systemCheck
+        case environmentSetup
+        case serverStart
+
+        var label: String {
+            switch self {
+            case .systemCheck: return "System Check"
+            case .environmentSetup: return "Environment Setup"
+            case .serverStart: return "Starting Server"
+            }
+        }
+    }
+
+    enum StepStatus: Equatable {
+        case pending
+        case inProgress
+        case completed
+        case error(String)
+
+        var isError: Bool {
+            if case .error = self { return true }
+            return false
+        }
+    }
+
+    private enum SetupError: LocalizedError {
+        case message(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .message(let msg): return msg
+            }
         }
     }
 }
