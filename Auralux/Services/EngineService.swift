@@ -43,6 +43,7 @@ final class EngineService {
     private var setupProcess: Process?
 
     private let inferenceService: InferenceService
+    private let log = AppLogger.shared
 
     private enum Keys {
         static let setupCompleted = "engine.setupCompleted"
@@ -120,12 +121,16 @@ final class EngineService {
     // MARK: - Status Check
 
     func checkStatus() async {
-        guard engineDirectory != nil else {
+        guard let dir = engineDirectory else {
+            log.warning("AuraluxEngine directory not found", category: .engine)
             state = .error("AuraluxEngine directory not found.")
             return
         }
 
+        log.info("Engine directory: \(dir.path)", category: .engine)
+
         if await inferenceService.isHealthy() {
+            log.info("Server already healthy", category: .engine)
             let health = await inferenceService.fetchHealth()
             if let health, health.modelLoaded {
                 updateModelStatus(from: health)
@@ -138,13 +143,14 @@ final class EngineService {
         }
 
         if !isACEStepCloned || !isVenvReady {
+            log.info("ACE-Step not cloned or venv not ready — needs setup", category: .engine)
             state = .notSetup
             return
         }
 
         if hasCompletedSetup {
+            log.info("Setup completed previously, attempting server start", category: .engine)
             state = .notSetup
-            // Venv exists but server not running — try starting
             await startServer()
         } else {
             state = .notSetup
@@ -165,6 +171,7 @@ final class EngineService {
             return
         }
 
+        log.info("Running engine setup from \(setupScript.path)", category: .engine)
         state = .settingUp(progress: "Starting environment setup...")
         setupLog = []
         appendLog("Starting Auralux Engine setup...")
@@ -228,11 +235,13 @@ final class EngineService {
 
         if proc.terminationStatus == 0 {
             appendLog("Setup completed successfully!")
+            log.info("Engine setup completed successfully", category: .engine)
             UserDefaults.standard.set(true, forKey: Keys.setupCompleted)
-            state = .notSetup // Will transition to starting when startServer is called
+            state = .notSetup
             await startServer()
         } else {
             appendLog("Setup failed with exit code \(proc.terminationStatus)")
+            log.error("Engine setup failed with exit code \(proc.terminationStatus)", category: .engine)
             state = .error("Environment setup failed. Check the log for details.")
         }
     }
@@ -254,6 +263,7 @@ final class EngineService {
         if setupLog.count > 500 {
             setupLog.removeFirst(100)
         }
+        log.debug(message, category: .engine)
     }
 
     // MARK: - Server Lifecycle
@@ -266,18 +276,20 @@ final class EngineService {
 
         let startScript = engineDir.appendingPathComponent("start_api_server_macos.sh")
         guard FileManager.default.fileExists(atPath: startScript.path) else {
+            log.error("start_api_server_macos.sh not found at \(startScript.path)", category: .engine)
             state = .error("start_api_server_macos.sh not found.")
             return
         }
 
-        // Check if server is already running
         if await inferenceService.isHealthy() {
+            log.info("Server already running — skipping launch", category: .engine)
             state = .running
             startHealthMonitoring()
             await refreshModelStatus()
             return
         }
 
+        log.info("Starting inference server from \(startScript.path)", category: .engine)
         state = .starting
         appendLog("Starting inference server...")
 
@@ -310,10 +322,10 @@ final class EngineService {
             return
         }
 
-        // Poll for health
         let maxAttempts = 120 // 60 seconds
         for attempt in 0..<maxAttempts {
             if await inferenceService.isHealthy() {
+                log.info("Server healthy after ~\(attempt / 2)s", category: .engine)
                 state = .running
                 startHealthMonitoring()
                 await refreshModelStatus()
@@ -321,8 +333,8 @@ final class EngineService {
                 return
             }
 
-            // Check if process died
             if !proc.isRunning {
+                log.error("Server process exited with code \(proc.terminationStatus)", category: .engine)
                 state = .error("Server process exited unexpectedly (code \(proc.terminationStatus)).")
                 return
             }
@@ -333,6 +345,7 @@ final class EngineService {
             try? await Task.sleep(for: .milliseconds(500))
         }
 
+        log.error("Server did not become healthy within 60 seconds", category: .engine)
         state = .error("Server did not become healthy within 60 seconds.")
     }
 

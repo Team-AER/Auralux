@@ -7,6 +7,7 @@ struct ContentView: View {
     @Environment(GenerationViewModel.self) private var generationViewModel
     @Environment(EngineService.self) private var engineService
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openWindow) private var openWindow
     @State private var didBootstrap = false
 
     var body: some View {
@@ -69,7 +70,16 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 HStack(spacing: 12) {
+                    Button {
+                        openWindow(id: "log-viewer")
+                    } label: {
+                        Image(systemName: "terminal")
+                            .help("Show Logs (Cmd+Opt+L)")
+                    }
+                    .keyboardShortcut("l", modifiers: [.command, .option])
+
                     EngineStatusView()
+
                     Text("Auralux")
                         .font(.headline)
                 }

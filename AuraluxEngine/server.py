@@ -221,14 +221,50 @@ def _run_job(
     seed: Optional[int],
 ) -> None:
     """Execute a generation job — real model or stub fallback."""
-    JOBS.update(job_id, status="running", progress=0.05, message="Initializing …")
+    JOBS.update(job_id, status="running", progress=0.01, message="Starting up …")
 
     output_dir = Path.home() / "Library" / "Application Support" / "Auralux" / "Generated"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{job_id}.wav"
 
     try:
-        model_ready = _ensure_initialized()
+        # If the model hasn't been initialized yet, run initialization in
+        # a secondary thread so we can provide progress feedback.
+        if not _init_done:
+            JOBS.update(
+                job_id,
+                progress=0.02,
+                message="Loading AI model (first run may take several minutes) …",
+            )
+            init_event = threading.Event()
+            init_result: Dict[str, Any] = {}
+
+            def _do_init() -> None:
+                init_result["ok"] = _ensure_initialized()
+                init_event.set()
+
+            init_thread = threading.Thread(target=_do_init, daemon=True)
+            init_thread.start()
+
+            elapsed = 0.0
+            tick = 2.0
+            while not init_event.wait(timeout=tick):
+                job = JOBS.get(job_id)
+                if job and job.cancelled:
+                    return
+                elapsed += tick
+                progress = min(0.08, 0.02 + elapsed * 0.0005)
+                JOBS.update(
+                    job_id,
+                    progress=round(progress, 4),
+                    message=f"Loading AI model … ({int(elapsed)}s elapsed)",
+                )
+
+            model_ready = init_result.get("ok", False)
+        else:
+            model_ready = _dit_handler is not None
+
+        JOBS.update(job_id, progress=0.09, message="Model ready, preparing generation …")
 
         if model_ready and _dit_handler is not None:
             _run_real_inference(
@@ -272,7 +308,13 @@ def _run_real_inference(
     seed: Optional[int],
     output_path: Path,
 ) -> None:
-    """Run ACE-Step v1.5 inference and write the output audio file."""
+    """Run ACE-Step v1.5 inference and write the output audio file.
+
+    Because ``generate_music()`` is a blocking call with no built-in
+    progress callback, we run it in a secondary thread and advance a
+    synthetic progress bar on the current thread so the Swift client
+    sees continuous updates while inference is running.
+    """
     from acestep.inference import GenerationParams, GenerationConfig, generate_music
 
     caption = prompt
@@ -306,13 +348,57 @@ def _run_real_inference(
 
     JOBS.update(job_id, progress=0.15, message="Running inference …")
 
-    result = generate_music(
-        dit_handler=_dit_handler,
-        llm_handler=_llm_handler,
-        params=params,
-        config=config,
-        save_dir=save_dir,
-    )
+    # Run the blocking inference in a secondary thread so we can
+    # update synthetic progress on the current thread.
+    inference_result: Dict[str, Any] = {}
+    inference_done = threading.Event()
+
+    def _do_inference() -> None:
+        try:
+            result = generate_music(
+                dit_handler=_dit_handler,
+                llm_handler=_llm_handler,
+                params=params,
+                config=config,
+                save_dir=save_dir,
+            )
+            inference_result["value"] = result
+        except Exception as exc:
+            inference_result["error"] = exc
+        finally:
+            inference_done.set()
+
+    worker = threading.Thread(target=_do_inference, daemon=True)
+    worker.start()
+
+    # Synthetic progress: smoothly advance from 0.15 → 0.90 while
+    # inference runs.  Estimated total time scales with duration.
+    estimated_seconds = max(30.0, duration * 2.5)
+    progress_start = 0.15
+    progress_end = 0.90
+    elapsed = 0.0
+    tick = 1.0
+
+    while not inference_done.wait(timeout=tick):
+        job = JOBS.get(job_id)
+        if job and job.cancelled:
+            log.info("Job %s cancelled during inference", job_id)
+            return
+
+        elapsed += tick
+        fraction = min(elapsed / estimated_seconds, 1.0)
+        current = progress_start + (progress_end - progress_start) * fraction
+        pct = int(current * 100)
+        JOBS.update(
+            job_id,
+            progress=round(current, 3),
+            message=f"Generating audio … {pct}%",
+        )
+
+    if "error" in inference_result:
+        raise inference_result["error"]
+
+    result = inference_result["value"]
 
     if not result.success:
         raise RuntimeError(result.error or "Generation failed with no error message")

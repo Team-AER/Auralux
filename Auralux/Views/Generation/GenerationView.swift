@@ -49,8 +49,16 @@ struct GenerationView: View {
 
                     switch viewModel.state {
                     case .generating, .preparing:
-                        ProgressView(value: viewModel.progress)
-                            .frame(width: 160)
+                        VStack(alignment: .trailing, spacing: 4) {
+                            ProgressView(value: viewModel.progress)
+                                .frame(width: 200)
+                            if !viewModel.progressMessage.isEmpty {
+                                Text(viewModel.progressMessage)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
                     case .completed:
                         Label("Done", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)

@@ -170,6 +170,18 @@ actor InferenceService {
         self.launcher = launcher
     }
 
+    private func logInfo(_ msg: String) {
+        Task { @MainActor in AppLogger.shared.info(msg, category: .inference) }
+    }
+
+    private func logError(_ msg: String) {
+        Task { @MainActor in AppLogger.shared.error(msg, category: .inference) }
+    }
+
+    private func logDebug(_ msg: String) {
+        Task { @MainActor in AppLogger.shared.debug(msg, category: .inference) }
+    }
+
     // MARK: Server lifecycle
 
     func startServerIfNeeded() async throws {
@@ -226,22 +238,29 @@ actor InferenceService {
     func generate(_ requestBody: GenerationRequest) async throws -> GenerationResponse {
         try await startServerIfNeeded()
 
+        logInfo("POST /generate — prompt=\"\(requestBody.prompt.prefix(60))\"")
+
         var request = URLRequest(url: baseURL.appendingPathComponent("generate"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
         request.httpBody = try JSONEncoder().encode(requestBody)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw InferenceError.invalidResponse }
         guard (200...299).contains(http.statusCode) else {
+            logError("generate failed: HTTP \(http.statusCode)")
             throw InferenceError.requestFailed("generate failed: \(http.statusCode)")
         }
 
-        return try JSONDecoder().decode(GenerationResponse.self, from: data)
+        let decoded = try JSONDecoder().decode(GenerationResponse.self, from: data)
+        logInfo("Job accepted: \(decoded.jobID)")
+        return decoded
     }
 
     func poll(jobID: String) async throws -> GenerationStatusResponse {
-        let request = URLRequest(url: baseURL.appendingPathComponent("jobs/\(jobID)"))
+        var request = URLRequest(url: baseURL.appendingPathComponent("jobs/\(jobID)"))
+        request.timeoutInterval = 10
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw InferenceError.invalidResponse }
         guard (200...299).contains(http.statusCode) else {

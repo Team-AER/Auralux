@@ -1,8 +1,20 @@
+import AppKit
 import SwiftData
 import SwiftUI
 
+/// Ensures the SPM-built executable is promoted to a regular GUI application
+/// so macOS gives it a menu bar, Dock icon, and keyboard focus.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+}
+
 @main
 struct AuraluxApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     @State private var sidebarViewModel = SidebarViewModel()
     @State private var generationViewModel: GenerationViewModel
     @State private var historyViewModel = HistoryViewModel()
@@ -26,6 +38,8 @@ struct AuraluxApp: App {
         } catch {
             fatalError("Failed to initialize SwiftData container: \(error)")
         }
+
+        AppLogger.shared.info("Auralux launched", category: .app)
     }
 
     var body: some Scene {
@@ -44,5 +58,21 @@ struct AuraluxApp: App {
         }
         .modelContainer(modelContainer)
         .defaultSize(width: 1280, height: 840)
+        .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Auralux") {
+                    NSApplication.shared.orderFrontStandardAboutPanel(options: [
+                        NSApplication.AboutPanelOptionKey.applicationName: AppConstants.appName,
+                        NSApplication.AboutPanelOptionKey.applicationVersion: "1.0.0",
+                    ])
+                }
+            }
+            CommandGroup(replacing: .newItem) {}
+        }
+
+        Window("Auralux Logs", id: "log-viewer") {
+            LogViewerView()
+        }
+        .defaultSize(width: 800, height: 500)
     }
 }

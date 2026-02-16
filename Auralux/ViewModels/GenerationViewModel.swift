@@ -31,10 +31,12 @@ final class GenerationViewModel {
 
     var state: GenerationState = .idle
     var progress: Double = 0
+    var progressMessage: String = ""
     var currentJobID: String?
     var lastTrack: GeneratedTrack?
 
     private let inferenceService: InferenceService
+    private let log = AppLogger.shared
     private var generationTask: Task<Void, Never>?
 
     init(inferenceService: InferenceService) {
@@ -69,6 +71,7 @@ final class GenerationViewModel {
         generationTask?.cancel()
         state = .preparing
         progress = 0
+        progressMessage = "Submitting..."
 
         let request = GenerationRequest(
             prompt: prompt,
@@ -79,17 +82,23 @@ final class GenerationViewModel {
             seed: Int(seedText)
         )
 
+        log.info("Starting generation: \"\(prompt.prefix(60))\" duration=\(duration)s", category: .generation)
+
         generationTask = Task {
             do {
                 let submission = try await inferenceService.generate(request)
                 currentJobID = submission.jobID
                 state = .generating
+                log.info("Job submitted: \(submission.jobID)", category: .generation)
                 try await pollUntilComplete(jobID: submission.jobID, request: request, context: context)
                 state = .completed
+                log.info("Generation completed successfully", category: .generation)
             } catch is CancellationError {
                 state = .idle
+                log.info("Generation cancelled", category: .generation)
             } catch {
                 state = .failed(error.localizedDescription)
+                log.error("Generation failed: \(error.localizedDescription)", category: .generation)
             }
         }
     }
@@ -101,45 +110,81 @@ final class GenerationViewModel {
                 try? await inferenceService.cancel(jobID: currentJobID)
             }
         }
+        log.info("Generation cancelled by user", category: .generation)
         state = .idle
         progress = 0
+        progressMessage = ""
         currentJobID = nil
     }
 
     private func pollUntilComplete(jobID: String, request: GenerationRequest, context: ModelContext) async throws {
         let historyService = HistoryService(context: context)
+        var consecutiveErrors = 0
+        let maxConsecutiveErrors = 10
+        var lastLoggedStatus = ""
+        var pollCount = 0
 
         while !Task.isCancelled {
-            let status = try await inferenceService.poll(jobID: jobID)
-            progress = status.progress
+            do {
+                let status = try await inferenceService.poll(jobID: jobID)
+                consecutiveErrors = 0
+                pollCount += 1
+                progress = status.progress
+                progressMessage = status.message ?? ""
 
-            if status.status == "failed" {
-                throw NSError(domain: "Auralux", code: -1, userInfo: [NSLocalizedDescriptionKey: status.message ?? "Generation failed"])
+                // Log every poll so the user can see what's happening
+                let statusSummary = "[\(status.status)] \(Int(status.progress * 100))% — \(status.message ?? "")"
+                if statusSummary != lastLoggedStatus {
+                    log.info("Poll #\(pollCount): \(statusSummary)", category: .generation)
+                    lastLoggedStatus = statusSummary
+                } else if pollCount % 10 == 0 {
+                    // Even if unchanged, log periodically so it's clear we're still alive
+                    log.debug("Poll #\(pollCount): still \(statusSummary)", category: .generation)
+                }
+
+                if status.status == "failed" {
+                    throw NSError(domain: "Auralux", code: -1, userInfo: [NSLocalizedDescriptionKey: status.message ?? "Generation failed"])
+                }
+
+                if status.status == "completed" {
+                    let storedPath: String? = {
+                        guard let raw = status.audioPath else { return nil }
+                        return FileUtilities.relativeAudioPath(from: raw)
+                    }()
+                    let track = GeneratedTrack(
+                        title: request.prompt,
+                        prompt: request.prompt,
+                        lyrics: request.lyrics,
+                        tags: request.tags,
+                        duration: request.duration,
+                        variance: request.variance,
+                        seed: request.seed,
+                        generationID: jobID,
+                        audioFilePath: storedPath
+                    )
+                    try historyService.insert(track)
+                    lastTrack = track
+                    currentJobID = nil
+                    return
+                }
+            } catch let error as NSError where error.domain == "Auralux" {
+                throw error
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                consecutiveErrors += 1
+                log.warning("Poll error (\(consecutiveErrors)/\(maxConsecutiveErrors)): \(error.localizedDescription)", category: .network)
+                if consecutiveErrors >= maxConsecutiveErrors {
+                    log.error("Too many consecutive poll errors, aborting", category: .network)
+                    throw InferenceError.requestFailed("Lost connection to server after \(maxConsecutiveErrors) retries")
+                }
             }
 
-            if status.status == "completed" {
-                let storedPath: String? = {
-                    guard let raw = status.audioPath else { return nil }
-                    return FileUtilities.relativeAudioPath(from: raw)
-                }()
-                let track = GeneratedTrack(
-                    title: request.prompt,
-                    prompt: request.prompt,
-                    lyrics: request.lyrics,
-                    tags: request.tags,
-                    duration: request.duration,
-                    variance: request.variance,
-                    seed: request.seed,
-                    generationID: jobID,
-                    audioFilePath: storedPath
-                )
-                try historyService.insert(track)
-                lastTrack = track
-                currentJobID = nil
-                return
-            }
-
-            try await Task.sleep(for: .milliseconds(500))
+            // Adaptive poll interval: 2s normally, back off on errors
+            let interval = consecutiveErrors > 0
+                ? min(Double(consecutiveErrors) * 2.0, 10.0)
+                : 2.0
+            try await Task.sleep(for: .seconds(interval))
         }
 
         throw CancellationError()
