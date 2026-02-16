@@ -42,9 +42,116 @@ logging.basicConfig(
 log = logging.getLogger("auralux")
 
 # Ensure MPS fallback is enabled before any PyTorch import.
-# This prevents Metal shader assertion crashes (e.g. masked_fill on MPS)
-# by transparently routing unsupported ops to CPU.
+# This prevents Metal shader assertion crashes for *unsupported* MPS ops
+# by transparently routing them to CPU.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: masked_fill on MPS
+# ---------------------------------------------------------------------------
+# PyTorch's masked_fill is technically "supported" on MPS so the fallback env
+# var above does NOT help.  However the underlying Metal shader
+# (masked_fill_scalar_strided_32bit) has a buffer-binding bug that triggers:
+#
+#   "Read-only bytes are being bound at index 6 to a shader argument
+#    with write access enabled"
+#
+# This kills the process.  The workaround is to move tensors to CPU for
+# the masked_fill call and copy the result back.
+try:
+    import torch as _torch
+
+    _orig_masked_fill = _torch.Tensor.masked_fill
+    _orig_masked_fill_ = _torch.Tensor.masked_fill_
+
+    def _safe_masked_fill(self, mask, value):
+        if self.device.type == "mps":
+            cpu_mask = mask.cpu() if isinstance(mask, _torch.Tensor) else mask
+            return _orig_masked_fill(self.cpu(), cpu_mask, value).to(self.device)
+        return _orig_masked_fill(self, mask, value)
+
+    def _safe_masked_fill_(self, mask, value):
+        if self.device.type == "mps":
+            cpu_mask = mask.cpu() if isinstance(mask, _torch.Tensor) else mask
+            result = _orig_masked_fill(self.cpu(), cpu_mask, value).to(self.device)
+            self.data.copy_(result.data)
+            return self
+        return _orig_masked_fill_(self, mask, value)
+
+    _torch.Tensor.masked_fill = _safe_masked_fill
+    _torch.Tensor.masked_fill_ = _safe_masked_fill_
+    log.info("Patched torch.Tensor.masked_fill for MPS safety")
+except ImportError:
+    pass  # torch not yet available; patch will be skipped
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: audio-code decoding on MPS
+# ---------------------------------------------------------------------------
+# The MPS Metal shader ``mul_dense_scalar_float_float`` has a buffer-binding
+# bug that triggers a fatal assertion inside torch.inference_mode():
+#
+#   "Read-only bytes are being bound at index 2 to a shader argument
+#    with write access enabled"
+#
+# This kills the server process during _decode_audio_codes_to_latents (the
+# quantizer / detokenizer forward pass).  Unlike masked_fill, scalar mul IS
+# reported as "supported" on MPS so PYTORCH_ENABLE_MPS_FALLBACK does not
+# help.
+#
+# The fix temporarily moves the small quantizer and detokenizer modules to
+# CPU for the decode, then restores them to MPS.  Since the heavy DiT and
+# VAE inference runs entirely on MLX, the performance impact is negligible.
+
+def _patch_mps_audio_code_decode() -> None:
+    """Replace _decode_audio_codes_to_latents with a CPU-safe variant."""
+    try:
+        import torch
+        from acestep.core.generation.handler.audio_codes import AudioCodesMixin
+    except ImportError:
+        return
+
+    _orig_decode = AudioCodesMixin._decode_audio_codes_to_latents
+
+    def _cpu_safe_decode(self, code_str):  # type: ignore[override]
+        if not hasattr(self, "device") or str(self.device).split(":")[0] != "mps":
+            return _orig_decode(self, code_str)
+
+        if (
+            self.model is None
+            or not hasattr(self.model, "tokenizer")
+            or not hasattr(self.model, "detokenizer")
+        ):
+            return None
+
+        code_ids = self._parse_audio_code_string(code_str)
+        if not code_ids:
+            return None
+
+        mps_dev = self.device
+
+        with self._load_model_context("model"):
+            quantizer = self.model.tokenizer.quantizer
+            detokenizer = self.model.detokenizer
+
+            quantizer.cpu()
+            detokenizer.cpu()
+            try:
+                indices = torch.tensor(code_ids, device="cpu", dtype=torch.long)
+                indices = indices.unsqueeze(0).unsqueeze(-1)
+
+                quantized = quantizer.get_output_from_indices(indices)
+                if quantized.dtype != self.dtype:
+                    quantized = quantized.to(self.dtype)
+                lm_hints = detokenizer(quantized)
+                return lm_hints.to(mps_dev)
+            finally:
+                quantizer.to(mps_dev)
+                detokenizer.to(mps_dev)
+
+    AudioCodesMixin._decode_audio_codes_to_latents = _cpu_safe_decode
+    log.info("Patched _decode_audio_codes_to_latents for MPS safety (CPU fallback)")
+
 
 # ---------------------------------------------------------------------------
 # Paths – resolve the cloned ACE-Step 1.5 repo so we can import `acestep`
@@ -83,6 +190,8 @@ def _ensure_initialized() -> bool:
             log.info("Importing ACE-Step 1.5 modules …")
             from acestep.handler import AceStepHandler
             from acestep.llm_inference import LLMHandler
+
+            _patch_mps_audio_code_decode()
 
             project_root = str(ACE_STEP_DIR)
             os.makedirs(str(CHECKPOINTS_DIR), exist_ok=True)

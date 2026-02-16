@@ -22,11 +22,11 @@ enum GenerationState: Equatable {
 @MainActor
 @Observable
 final class GenerationViewModel {
-    var prompt = ""
-    var lyrics = ""
-    var tags: [String] = []
-    var duration: Double = 30
-    var variance: Double = 0.5
+    var prompt = GenerationParameters.default.prompt
+    var lyrics = GenerationParameters.default.lyrics
+    var tags: [String] = GenerationParameters.default.tags
+    var duration: Double = GenerationParameters.default.duration
+    var variance: Double = GenerationParameters.default.variance
     var seedText = ""
 
     var state: GenerationState = .idle
