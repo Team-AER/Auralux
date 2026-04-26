@@ -53,12 +53,15 @@ final class AudioExportServiceTests: XCTestCase {
     }
 
     func testExportFLACIsUnsupported() async {
-        // AVAssetWriter does not support the public.flac UTI; export should
-        // throw .unsupported rather than crash.
-        await XCTAssertThrowsErrorAsync(
-            try await service.export(
+        do {
+            _ = try await service.export(
                 sourceURL: sourceURL, destinationDirectory: outputDir, configuration: config(.flac))
-        )
+            XCTFail("Expected AudioExportError.unsupported for FLAC")
+        } catch AudioExportError.unsupported {
+            // expected — AVAssetWriter does not support public.flac
+        } catch {
+            XCTFail("Expected .unsupported, got \(error)")
+        }
     }
 
     func testExportAAC() async throws {
@@ -77,12 +80,15 @@ final class AudioExportServiceTests: XCTestCase {
     }
 
     func testExportMP3IsUnsupported() async {
-        // AVAssetWriter does not support MP3 encoding (licensed codec not shipped
-        // by Apple). export should throw .unsupported rather than crash.
-        await XCTAssertThrowsErrorAsync(
-            try await service.export(
+        do {
+            _ = try await service.export(
                 sourceURL: sourceURL, destinationDirectory: outputDir, configuration: config(.mp3))
-        )
+            XCTFail("Expected AudioExportError.unsupported for MP3")
+        } catch AudioExportError.unsupported {
+            // expected — AVAssetWriter does not ship an MP3 encoder (licensed codec)
+        } catch {
+            XCTFail("Expected .unsupported, got \(error)")
+        }
     }
 
     // MARK: - Error cases

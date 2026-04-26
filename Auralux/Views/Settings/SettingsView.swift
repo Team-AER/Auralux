@@ -25,7 +25,7 @@ struct SettingsView: View {
 
             Section("Export") {
                 Picker("Default format", selection: Bindable(viewModel).defaultExportFormat) {
-                    ForEach(AudioExportFormat.allCases) { format in
+                    ForEach(AudioExportFormat.allCases.filter(\.isAvailable)) { format in
                         Text(format.rawValue.uppercased()).tag(format)
                     }
                 }

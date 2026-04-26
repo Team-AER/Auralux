@@ -49,21 +49,34 @@ final class HistoryService {
 
     /// Removes audio files in the Generated directory that are not referenced
     /// by any GeneratedTrack row. Safe to call on every launch.
-    func reconcileOrphans() throws {
+    /// The SwiftData fetch runs on the caller's actor; filesystem I/O is
+    /// offloaded to a background task so the main thread is not blocked.
+    func reconcileOrphans() async throws {
         let allTracks = try context.fetch(FetchDescriptor<GeneratedTrack>())
+        // Use resolvingSymlinksInPath() so that /var/folders and
+        // /private/var/folders resolve to the same canonical path.
         let referencedPaths = Set(allTracks.compactMap { $0.audioFilePath }.map {
-            FileUtilities.generatedAudioDirectory.appendingPathComponent($0).standardizedFileURL.path
+            FileUtilities.generatedAudioDirectory
+                .appendingPathComponent($0)
+                .resolvingSymlinksInPath().path
         })
 
-        let fm = FileManager.default
-        let dir = FileUtilities.generatedAudioDirectory
-        guard let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey]) else { return }
-        for case let fileURL as URL in enumerator {
-            let isFile = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
-            guard isFile else { continue }
-            if !referencedPaths.contains(fileURL.standardizedFileURL.path) {
-                try? fm.removeItem(at: fileURL)
+        await Task.detached(priority: .background) {
+            let fm = FileManager.default
+            let dir = FileUtilities.generatedAudioDirectory
+            guard let enumerator = fm.enumerator(
+                at: dir, includingPropertiesForKeys: [.isRegularFileKey]
+            ) else { return }
+            // Use nextObject() — DirectoryEnumerator.makeIterator() is unavailable
+            // in async contexts (Swift 6 concurrency restriction on NSEnumerator).
+            while let fileURL = enumerator.nextObject() as? URL {
+                let isFile = (try? fileURL.resourceValues(
+                    forKeys: [.isRegularFileKey]).isRegularFile) == true
+                guard isFile else { continue }
+                if !referencedPaths.contains(fileURL.resolvingSymlinksInPath().path) {
+                    try? fm.removeItem(at: fileURL)
+                }
             }
-        }
+        }.value
     }
 }

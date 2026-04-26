@@ -236,7 +236,7 @@ final class ServiceTests: XCTestCase {
     }
 
     @MainActor
-    func testHistoryServiceReconcileOrphansRemovesUnreferenced() throws {
+    func testHistoryServiceReconcileOrphansRemovesUnreferenced() async throws {
         let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
@@ -250,7 +250,7 @@ final class ServiceTests: XCTestCase {
         // Generated directory has no rows referencing it.
         let container = try makeInMemoryContainer()
         let service = HistoryService(context: container.mainContext)
-        XCTAssertNoThrow(try service.reconcileOrphans())
+        try await service.reconcileOrphans()
     }
 
     // MARK: - PresetService

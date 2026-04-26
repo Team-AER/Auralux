@@ -149,16 +149,28 @@ final class ViewModelTests: XCTestCase {
         vm1.lowMemoryMode = true
         vm1.autoStartServer = false
         vm1.maxConcurrentJobs = 3
-        vm1.defaultExportFormat = .flac
+        vm1.defaultExportFormat = .alac  // .flac is unavailable, use .alac
 
         let vm2 = SettingsViewModel(defaults: defaults)
         XCTAssertEqual(vm2.quantizationMode, .int8)
         XCTAssertTrue(vm2.lowMemoryMode)
         XCTAssertFalse(vm2.autoStartServer)
         XCTAssertEqual(vm2.maxConcurrentJobs, 3)
-        XCTAssertEqual(vm2.defaultExportFormat, .flac)
+        XCTAssertEqual(vm2.defaultExportFormat, .alac)
 
         defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testSettingsUnavailableExportFormatFallsBackToWAV() {
+        let suiteName = "test-unavailable-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // Manually persist an unavailable format value as if it was saved by an older build.
+        defaults.set(AudioExportFormat.flac.rawValue, forKey: "settings.defaultExportFormat")
+
+        let vm = SettingsViewModel(defaults: defaults)
+        XCTAssertEqual(vm.defaultExportFormat, .wav, "Unavailable format should fall back to .wav")
     }
 
     func testSettingsMaxConcurrentJobsClamped() {

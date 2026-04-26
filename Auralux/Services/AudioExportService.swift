@@ -9,6 +9,16 @@ enum AudioExportFormat: String, CaseIterable, Identifiable, Codable {
     case alac
 
     var id: String { rawValue }
+
+    /// Whether the system can encode this format via AVAssetWriter.
+    /// MP3 and FLAC are unsupported — they crash if passed to AVAssetWriter.
+    var isAvailable: Bool {
+        switch self {
+        case .mp3, .flac: return false
+        default: return true
+        }
+    }
+
     var fileExtension: String {
         switch self {
         case .aac, .alac: return "m4a"
@@ -175,7 +185,10 @@ final class AudioExportService: Sendable {
         assetWriter.add(writerInput)
 
         assetReader.startReading()
-        assetWriter.startWriting()
+        guard assetWriter.startWriting() else {
+            throw AudioExportError.transcodingFailed(
+                assetWriter.error?.localizedDescription ?? "Cannot start writing")
+        }
         assetWriter.startSession(atSourceTime: .zero)
 
         return try await withCheckedThrowingContinuation { continuation in

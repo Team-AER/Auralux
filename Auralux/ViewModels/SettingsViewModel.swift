@@ -79,7 +79,8 @@ final class SettingsViewModel {
             maxConcurrentJobs = max(1, min(4, stored))
         }
         if let raw = defaults.string(forKey: Keys.defaultExportFormat),
-           let format = AudioExportFormat(rawValue: raw) {
+           let format = AudioExportFormat(rawValue: raw),
+           format.isAvailable {
             defaultExportFormat = format
         }
     }

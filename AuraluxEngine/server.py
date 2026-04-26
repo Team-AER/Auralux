@@ -827,10 +827,13 @@ class Handler(BaseHTTPRequestHandler):
     def _read_json(self) -> Optional[Dict[str, object]]:
         """Read and parse the request body as JSON.
 
-        Returns the parsed dict, or None if the response has already been
-        sent (caller should return immediately in that case).
+        Returns the parsed dict, or None when a response has already been sent
+        to the client (caller must return immediately without sending another).
         """
-        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            length = 0
         if length <= 0:
             return {}
         if length > MAX_REQUEST_BYTES:
@@ -900,7 +903,7 @@ class Handler(BaseHTTPRequestHandler):
             tags = list(payload.get("tags", []))
 
             try:
-                duration = float(payload.get("duration_seconds", payload.get("duration", 30)))
+                duration = float(payload.get("duration", 30))
                 if not (0 < duration <= 600):
                     raise ValueError(f"duration must be between 0 and 600, got {duration}")
             except (TypeError, ValueError) as exc:
@@ -963,6 +966,16 @@ class Handler(BaseHTTPRequestHandler):
 # Main
 # ---------------------------------------------------------------------------
 
+class AuraluxHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with socket reuse and daemon request threads.
+
+    allow_reuse_address prevents TIME_WAIT from blocking a restart after a crash.
+    daemon_threads ensures request threads are torn down when the main thread exits.
+    """
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Auralux API server (ACE-Step v1.5)")
     parser.add_argument("--port", type=int, default=8765)
@@ -973,11 +986,7 @@ def main() -> None:
         log.info("Preloading model …")
         _ensure_initialized()
 
-    class _Server(ThreadingHTTPServer):
-        allow_reuse_address = True
-        daemon_threads = True  # request threads die when the main thread exits
-
-    server = _Server(("127.0.0.1", args.port), Handler)
+    server = AuraluxHTTPServer(("127.0.0.1", args.port), Handler)
     log.info("Auralux API server listening on http://127.0.0.1:%d", args.port)
     try:
         server.serve_forever()

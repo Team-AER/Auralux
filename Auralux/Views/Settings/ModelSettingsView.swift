@@ -105,9 +105,12 @@ struct ModelSettingsView: View {
     }
 
     private func parsePercent(from string: String) -> Int? {
-        guard let range = string.range(of: #"\d+"#, options: .regularExpression),
-              let value = Int(string[range]) else { return nil }
-        return value
+        // Match the explicit "N%" token so strings like "Step 1 of 10" don't
+        // accidentally parse as a percentage.
+        guard let match = string.range(of: #"\d+%"#, options: .regularExpression) else {
+            return nil
+        }
+        return Int(string[match].dropLast()) // drop the trailing '%'
     }
 
     // MARK: - Model List

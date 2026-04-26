@@ -29,7 +29,7 @@ struct ContentView: View {
 
             let presetService = PresetService(context: modelContext)
             try? presetService.bootstrapFromBundleIfNeeded()
-            try? HistoryService(context: modelContext).reconcileOrphans()
+            try? await HistoryService(context: modelContext).reconcileOrphans()
             historyViewModel.refresh(context: modelContext)
 
             // Check engine status on launch

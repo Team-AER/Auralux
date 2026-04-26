@@ -471,7 +471,8 @@ final class EngineService {
                     return
                 }
                 restartAttempts += 1
-                let backoffSeconds = pow(4.0, Double(restartAttempts - 1)) // 1s, 4s, 16s
+                // 1st failure → 1 s, 2nd → 4 s, 3rd → 16 s then give up.
+                let backoffSeconds = pow(4.0, Double(restartAttempts - 1))
                 appendLog("Server process died (attempt \(restartAttempts)/\(maxRestarts)). Restarting in \(Int(backoffSeconds))s…")
                 try? await Task.sleep(for: .seconds(backoffSeconds))
                 await startServerInternal()
@@ -538,7 +539,8 @@ final class EngineService {
             // Poll up to 30 min; surface progress via state so the UI can show it.
             let maxAttempts = 1800
             for attempt in 0..<maxAttempts {
-                try? await Task.sleep(for: .seconds(1))
+                // Propagate cancellation — do not swallow with try?
+                try await Task.sleep(for: .seconds(1))
                 if let health = await inferenceService.fetchHealth() {
                     if health.modelLoaded {
                         updateModelStatus(from: health)
@@ -553,6 +555,9 @@ final class EngineService {
             }
             appendLog("Model download timed out.")
             state = .error("Model download did not complete within 30 minutes.")
+        } catch is CancellationError {
+            // Task cancelled (e.g. app quit during download). Don't surface as an error.
+            if state != .ready { state = .running }
         } catch {
             appendLog("Model download failed: \(error.localizedDescription)")
             state = .error("Model download failed: \(error.localizedDescription)")
