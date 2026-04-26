@@ -22,9 +22,9 @@ final class ModelTests: XCTestCase {
 
     func testGenerationParametersDefaultValues() {
         let defaults = GenerationParameters.default
-        XCTAssertEqual(defaults.prompt, "")
-        XCTAssertEqual(defaults.lyrics, "")
-        XCTAssertTrue(defaults.tags.isEmpty)
+        XCTAssertEqual(defaults.prompt, "chill lofi piano")
+        XCTAssertTrue(defaults.lyrics.contains("[verse]"))
+        XCTAssertEqual(defaults.tags, ["lofi", "piano", "chill"])
         XCTAssertEqual(defaults.duration, 30)
         XCTAssertEqual(defaults.variance, 0.5)
         XCTAssertNil(defaults.seed)

@@ -17,6 +17,7 @@ enum AppConstants {
     static let modelDirectoryName = "Models"
     static let checkpointDirectoryName = "checkpoints"
     static let generatedDirectoryName = "Generated"
+    static let diagnosticsDirectoryName = "Diagnostics"
 
     static let suggestedTags = [
         "ambient", "cinematic", "lofi", "electronic", "jazz", "piano", "guitar", "synth",

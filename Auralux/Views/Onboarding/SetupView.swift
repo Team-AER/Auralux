@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// Compact glass overlay that auto-advances through engine setup steps.
-/// Shown automatically when the engine is not ready.
+/// Compact glass overlay that provisions the local engine environment.
 struct SetupView: View {
     @Environment(EngineService.self) private var engine
 
@@ -144,18 +143,13 @@ struct SetupView: View {
         if stepStatuses[.systemCheck] != .completed {
             await runStep(.systemCheck) {
                 let hasEngine = engine.engineDirectory != nil
-                #if arch(arm64)
-                let hasAppleSilicon = true
-                #else
-                let hasAppleSilicon = false
-                #endif
 
                 if !hasEngine {
                     throw SetupError.message("AuraluxEngine directory not found.")
                 }
-                if !hasAppleSilicon {
+                #if !arch(arm64)
                     throw SetupError.message("Apple Silicon (M1 or later) is required.")
-                }
+                #endif
             }
             guard !hasError, !Task.isCancelled else { return }
         }
@@ -172,24 +166,6 @@ struct SetupView: View {
                             throw SetupError.message(msg)
                         }
                         throw SetupError.message("Environment setup did not complete successfully.")
-                    }
-                }
-                guard !hasError, !Task.isCancelled else { return }
-            }
-        }
-
-        // Step 3: Server Start
-        if stepStatuses[.serverStart] != .completed {
-            if engine.state.isRunning || engine.state.isReady {
-                withAnimation { stepStatuses[.serverStart] = .completed }
-            } else {
-                await runStep(.serverStart) {
-                    await engine.startServer()
-                    if !engine.state.isRunning && !engine.state.isReady {
-                        if case .error(let msg) = engine.state {
-                            throw SetupError.message(msg)
-                        }
-                        throw SetupError.message("Server failed to start.")
                     }
                 }
                 guard !hasError, !Task.isCancelled else { return }
@@ -249,15 +225,6 @@ struct SetupView: View {
             if case .settingUp(let progress) = newState {
                 withAnimation { detailText = progress }
             }
-        case .serverStart:
-            switch newState {
-            case .starting:
-                withAnimation { detailText = "Starting the inference server..." }
-            case .running:
-                withAnimation { detailText = "Server running, loading models..." }
-            default:
-                break
-            }
         default:
             break
         }
@@ -270,13 +237,11 @@ extension SetupView {
     enum Step: Int, CaseIterable {
         case systemCheck
         case environmentSetup
-        case serverStart
 
         var label: String {
             switch self {
             case .systemCheck: return "System Check"
             case .environmentSetup: return "Environment Setup"
-            case .serverStart: return "Starting Server"
             }
         }
     }

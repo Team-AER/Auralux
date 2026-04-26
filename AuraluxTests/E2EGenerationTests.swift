@@ -8,13 +8,11 @@ import XCTest
 ///   SwiftData persistence → player readiness
 ///
 /// The Python inference server is replaced by `MockURLProtocol` which returns
-/// scripted HTTP responses, and the process launcher is replaced by
-/// `MockServerLauncher`.  SwiftData uses an in-memory store for isolation.
+/// scripted HTTP responses. SwiftData uses an in-memory store for isolation.
 @MainActor
 final class E2EGenerationTests: XCTestCase {
 
     private var session: URLSession!
-    private var launcher: MockServerLauncher!
     private var inferenceService: InferenceService!
     private var viewModel: GenerationViewModel!
     private var container: ModelContainer!
@@ -27,7 +25,7 @@ final class E2EGenerationTests: XCTestCase {
 
         MockURLProtocol.reset()
 
-        // Register a healthy response so startServerIfNeeded() passes instantly
+        // Register a healthy response so the HTTP-only readiness check passes instantly.
         MockURLProtocol.register(
             path: "/health",
             response: .init(statusCode: 200, json: [
@@ -38,11 +36,9 @@ final class E2EGenerationTests: XCTestCase {
         )
 
         session = MockURLProtocol.urlSession()
-        launcher = MockServerLauncher()
 
         inferenceService = InferenceService(
             baseURL: URL(string: "http://127.0.0.1:8765")!,
-            launcher: launcher,
             session: session
         )
 
@@ -59,7 +55,6 @@ final class E2EGenerationTests: XCTestCase {
     override func tearDown() async throws {
         MockURLProtocol.reset()
         session = nil
-        launcher = nil
         inferenceService = nil
         viewModel = nil
         container = nil

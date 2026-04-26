@@ -34,145 +34,62 @@ struct HealthResponse: Codable, Sendable {
     var engine: String?
     var ditModel: String?
     var llmModel: String?
+    var stats: EngineRuntimeStats?
+}
+
+struct EngineRuntimeStats: Codable, Equatable, Sendable {
+    var pid: Int?
+    var uptimeSeconds: Double?
+    var cpuPercent: Double?
+    var memoryRSSMB: Double?
+    var activeThreads: Int?
+    var jobCounts: [String: Int]?
+    var statsError: String?
+
+    static let empty = EngineRuntimeStats(
+        pid: nil,
+        uptimeSeconds: nil,
+        cpuPercent: nil,
+        memoryRSSMB: nil,
+        activeThreads: nil,
+        jobCounts: nil,
+        statsError: nil
+    )
 }
 
 // MARK: - Errors
 
 enum InferenceError: Error, LocalizedError {
-    case serverScriptMissing
-    case serverLaunchFailed
     case serverUnhealthy
     case invalidResponse
     case requestFailed(String)
-    case modelNotReady
-    case sandboxRestricted
     case jobNotFound(String)
 
     var errorDescription: String? {
         switch self {
-        case .serverScriptMissing:
-            return "Server launch script not found. Run setup_env.sh first."
-        case .serverLaunchFailed:
-            return "Failed to start the inference server process."
         case .serverUnhealthy:
             return "Inference server did not become healthy in time."
         case .invalidResponse:
             return "Received an invalid response from the server."
         case .requestFailed(let detail):
             return "Request failed: \(detail)"
-        case .modelNotReady:
-            return "Model is still downloading or not yet loaded."
-        case .sandboxRestricted:
-            return "Cannot launch server in App Sandbox. Start the Auralux Engine manually."
         case .jobNotFound(let jobID):
             return "Job \(jobID) lost — the inference server crashed and restarted. Please try again."
         }
     }
 }
 
-// MARK: - Server Launcher Protocol
-
-/// Abstracts how the inference server is started. Allows swapping between
-/// Process-based (dev/direct distribution) and XPC-based (App Store) strategies.
-protocol ServerLauncher: Sendable {
-    func launch() async throws
-    func stop() async
-    var isRunning: Bool { get async }
-}
-
-/// Launches the Python inference server as a subprocess.
-/// Works for development and direct (notarized) distribution.
-/// NOT compatible with the Mac App Store sandbox.
-final class ProcessServerLauncher: ServerLauncher, @unchecked Sendable {
-    private var process: Process?
-    private let lock = NSLock()
-
-    var isRunning: Bool {
-        lock.withLock { process?.isRunning ?? false }
-    }
-
-    func launch() async throws {
-        if isRunning { return }
-
-        guard !Self.isAppSandboxed else {
-            throw InferenceError.sandboxRestricted
-        }
-
-        guard let scriptURL = Self.locateServerScript(),
-              FileManager.default.fileExists(atPath: scriptURL.path) else {
-            throw InferenceError.serverScriptMissing
-        }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        proc.arguments = [scriptURL.path]
-        proc.currentDirectoryURL = scriptURL.deletingLastPathComponent()
-        proc.standardOutput = Pipe()
-        proc.standardError = Pipe()
-
-        do {
-            try proc.run()
-            lock.withLock { process = proc }
-        } catch {
-            throw InferenceError.serverLaunchFailed
-        }
-    }
-
-    func stop() async {
-        lock.withLock {
-            guard let proc = process else { return }
-            if proc.isRunning { proc.terminate() }
-            process = nil
-        }
-    }
-
-    /// Detects whether the current process is running inside the App Sandbox.
-    private static var isAppSandboxed: Bool {
-        ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
-    }
-
-    private static func locateServerScript() -> URL? {
-        let candidates = [
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("AuraluxEngine/start_api_server_macos.sh"),
-            Bundle.main.bundleURL
-                .deletingLastPathComponent()
-                .appendingPathComponent("AuraluxEngine/start_api_server_macos.sh"),
-            Bundle.main.resourceURL?
-                .appendingPathComponent("AuraluxEngine/start_api_server_macos.sh"),
-        ].compactMap { $0 }
-
-        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
-    }
-}
-
-/// Placeholder for a future XPC-based launcher suitable for the Mac App Store.
-/// The XPC service would be a separate target bundled inside the .app that
-/// manages the Python runtime and inference server.
-final class XPCServerLauncher: ServerLauncher {
-    var isRunning: Bool { false }
-
-    func launch() async throws {
-        throw InferenceError.sandboxRestricted
-    }
-
-    func stop() async {}
-}
-
 // MARK: - Service
 
 actor InferenceService {
     private let baseURL: URL
-    private let launcher: ServerLauncher
     private let session: URLSession
 
     init(
         baseURL: URL = AppConstants.inferenceBaseURL,
-        launcher: ServerLauncher = ProcessServerLauncher(),
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
-        self.launcher = launcher
         self.session = session
     }
 
@@ -188,26 +105,11 @@ actor InferenceService {
         Task { @MainActor in AppLogger.shared.debug(msg, category: .inference) }
     }
 
-    // MARK: Server lifecycle
+    // MARK: Server readiness
 
-    func startServerIfNeeded() async throws {
+    func requireHealthyServer() async throws {
         if await isHealthy() { return }
-        if await launcher.isRunning { return }
-
-        try await launcher.launch()
-
-        let maxAttempts = 600
-        for _ in 0..<maxAttempts {
-            if await isHealthy() {
-                return
-            }
-            try? await Task.sleep(for: .milliseconds(500))
-        }
         throw InferenceError.serverUnhealthy
-    }
-
-    func stopServer() async {
-        await launcher.stop()
     }
 
     // MARK: Health
@@ -242,7 +144,7 @@ actor InferenceService {
     // MARK: Generation
 
     func generate(_ requestBody: GenerationRequest) async throws -> GenerationResponse {
-        try await startServerIfNeeded()
+        try await requireHealthyServer()
 
         logInfo("POST /generate — prompt=\"\(requestBody.prompt.prefix(60))\"")
 
@@ -291,7 +193,7 @@ actor InferenceService {
     // MARK: Model management
 
     func triggerModelDownload() async throws {
-        try await startServerIfNeeded()
+        try await requireHealthyServer()
 
         var request = URLRequest(url: baseURL.appendingPathComponent("models/download"))
         request.httpMethod = "POST"

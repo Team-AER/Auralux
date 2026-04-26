@@ -8,6 +8,8 @@ final class PlayerViewModel {
     let playerService: AudioPlayerService
     var loadedPath: String?
     var errorMessage: String?
+    private var waveformTask: Task<Void, Never>?
+    private let log = AppLogger.shared
 
     var isPlaying: Bool { playerService.isPlaying }
     var currentTime: TimeInterval { playerService.currentTime }
@@ -30,24 +32,38 @@ final class PlayerViewModel {
 
     func load(path: String?) {
         guard let path else { return }
+        guard loadedPath != path else { return }
         errorMessage = nil
+        waveformTask?.cancel()
+        waveformSamples = []
+        log.info("PlayerViewModel load path=\(path)", category: .player)
         do {
             let url = FileUtilities.resolveAudioPath(path)
             try playerService.load(url: url)
             loadedPath = path
-            Task {
-                waveformSamples = await Self.extractWaveform(from: url, targetSampleCount: 200)
+            waveformTask = Task {
+                let samples = await Self.extractWaveform(from: url, targetSampleCount: 200)
+                guard !Task.isCancelled else { return }
+                waveformSamples = samples
+                await MainActor.run {
+                    self.log.info("Waveform extraction complete samples=\(samples.count)", category: .player)
+                }
             }
         } catch {
+            loadedPath = nil
             errorMessage = "Failed to load audio: \(error.localizedDescription)"
+            log.error("PlayerViewModel load failed: \(error.localizedDescription)", category: .player)
+            _ = playerService.captureDiagnostics(reason: "load_failed_ui")
         }
     }
 
     func playPause() {
         errorMessage = nil
         if isPlaying {
+            log.info("PlayerViewModel pause requested", category: .player)
             playerService.pause()
         } else {
+            log.info("PlayerViewModel play requested", category: .player)
             playerService.play()
         }
     }
@@ -63,6 +79,17 @@ final class PlayerViewModel {
 
     func clearError() {
         errorMessage = nil
+    }
+
+    @discardableResult
+    func capturePlaybackDiagnostics(reason: String = "manual_capture_ui") -> URL? {
+        let snapshotURL = playerService.captureDiagnostics(reason: reason)
+        if let snapshotURL {
+            log.warning("Playback diagnostics snapshot saved: \(snapshotURL.path)", category: .player)
+        } else {
+            log.error("Failed to capture playback diagnostics snapshot", category: .player)
+        }
+        return snapshotURL
     }
 
     /// Downsamples audio file into an array of amplitude values for waveform rendering.

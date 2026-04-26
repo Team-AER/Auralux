@@ -19,6 +19,10 @@ struct SettingsView: View {
                 Toggle("Auto-start local server", isOn: Bindable(viewModel).autoStartServer)
             }
 
+            Section("Engine") {
+                EngineControlPanel()
+            }
+
             Section("Export") {
                 Picker("Default format", selection: Bindable(viewModel).defaultExportFormat) {
                     ForEach(AudioExportFormat.allCases) { format in

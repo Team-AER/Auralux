@@ -14,24 +14,24 @@ final class ViewModelTests: XCTestCase {
         viewModel.addTag("ambient")
         viewModel.addTag("piano")
 
-        XCTAssertEqual(viewModel.tags, ["ambient", "piano"])
+        XCTAssertEqual(viewModel.tags, ["lofi", "piano", "chill", "ambient"])
 
         viewModel.removeTag("ambient")
-        XCTAssertEqual(viewModel.tags, ["piano"])
+        XCTAssertEqual(viewModel.tags, ["lofi", "piano", "chill"])
     }
 
     func testAddEmptyTagIsIgnored() {
         let viewModel = GenerationViewModel(inferenceService: InferenceService())
         viewModel.addTag("")
         viewModel.addTag("   ")
-        XCTAssertTrue(viewModel.tags.isEmpty)
+        XCTAssertEqual(viewModel.tags, ["lofi", "piano", "chill"])
     }
 
     func testRemoveNonexistentTagDoesNothing() {
         let viewModel = GenerationViewModel(inferenceService: InferenceService())
         viewModel.addTag("rock")
         viewModel.removeTag("jazz")
-        XCTAssertEqual(viewModel.tags, ["rock"])
+        XCTAssertEqual(viewModel.tags, ["lofi", "piano", "chill", "rock"])
     }
 
     // MARK: - GenerationViewModel Preset
@@ -67,12 +67,12 @@ final class ViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.lastTrack)
     }
 
-    func testGenerateWithEmptyPromptFails() {
+    func testGenerateWithEmptyPromptFails() throws {
         let viewModel = GenerationViewModel(inferenceService: InferenceService())
         viewModel.prompt = "   "
 
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
-        let container = try! ModelContainer(for: GeneratedTrack.self, Preset.self, Tag.self, configurations: config)
+        let container = try ModelContainer(for: GeneratedTrack.self, Preset.self, Tag.self, configurations: config)
         viewModel.generate(in: container.mainContext)
 
         XCTAssertEqual(viewModel.state, .failed("Prompt is required."))

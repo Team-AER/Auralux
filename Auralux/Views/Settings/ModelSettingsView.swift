@@ -190,9 +190,9 @@ struct ModelSettingsView: View {
     // MARK: - Networking
 
     private func refreshStatus() async {
+        serverRunning = await manager.isServerHealthy()
         let status = await manager.fetchModelStatus()
         modelStatus = status
-        serverRunning = status.device != "unknown"
         errorMessage = status.error
     }
 

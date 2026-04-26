@@ -61,4 +61,4 @@ echo
 # ── Activate venv and run server ─────────────────────────────────────────
 
 source "$VENV_DIR/bin/activate"
-python "$SCRIPT_DIR/server.py" --port "$PORT"
+exec python "$SCRIPT_DIR/server.py" --port "$PORT"

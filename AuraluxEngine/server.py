@@ -22,6 +22,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -40,6 +41,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("auralux")
+STARTED_AT = time.time()
 
 # Ensure MPS fallback is enabled before any PyTorch import.
 # This prevents Metal shader assertion crashes for *unsupported* MPS ops
@@ -513,8 +515,40 @@ class JobStore:
             for key, value in kwargs.items():
                 setattr(job, key, value)
 
+    def status_counts(self) -> Dict[str, int]:
+        with self._lock:
+            counts: Dict[str, int] = {}
+            for job in self._jobs.values():
+                counts[job.status] = counts.get(job.status, 0) + 1
+            return counts
+
 
 JOBS = JobStore()
+
+
+def _process_stats() -> Dict[str, Any]:
+    pid = os.getpid()
+    stats: Dict[str, Any] = {
+        "pid": pid,
+        "uptimeSeconds": round(time.time() - STARTED_AT, 1),
+        "activeThreads": threading.active_count(),
+        "jobCounts": JOBS.status_counts(),
+    }
+
+    try:
+        output = subprocess.check_output(
+            ["/bin/ps", "-o", "%cpu=", "-o", "rss=", "-p", str(pid)],
+            text=True,
+            timeout=1,
+        )
+        values = output.strip().split()
+        if len(values) >= 2:
+            stats["cpuPercent"] = float(values[0])
+            stats["memoryRSSMB"] = round(float(values[1]) / 1024, 1)
+    except Exception as exc:
+        stats["statsError"] = str(exc)
+
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +634,16 @@ def _run_job(
             )
         else:
             _run_stub_inference(job_id, prompt, duration, output_path)
+
+        job = JOBS.get(job_id)
+        if job and job.cancelled:
+            JOBS.update(
+                job_id,
+                status="cancelled",
+                progress=0.0,
+                message="Job cancelled",
+            )
+            return
 
         JOBS.update(
             job_id,
@@ -806,6 +850,7 @@ class Handler(BaseHTTPRequestHandler):
                 "engine": "ace-step-v1.5",
                 "ditModel": os.environ.get("ACESTEP_CONFIG_PATH", "acestep-v15-turbo"),
                 "llmModel": os.environ.get("ACESTEP_LM_MODEL_PATH", "acestep-5Hz-lm-0.6B"),
+                "stats": _process_stats(),
             })
             return
 

@@ -4,10 +4,17 @@ import SwiftUI
 
 /// Ensures the SPM-built executable is promoted to a regular GUI application
 /// so macOS gives it a menu bar, Dock icon, and keyboard focus.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var onTerminate: (() -> Void)?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        onTerminate?()
     }
 }
 
@@ -52,8 +59,10 @@ struct AuraluxApp: App {
                 .environment(playerViewModel)
                 .environment(settingsViewModel)
                 .environment(engineService)
-                .onDisappear {
-                    engineService.shutdown()
+                .onAppear {
+                    appDelegate.onTerminate = {
+                        engineService.shutdown()
+                    }
                 }
         }
         .modelContainer(modelContainer)

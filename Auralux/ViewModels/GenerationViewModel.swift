@@ -62,7 +62,7 @@ final class GenerationViewModel {
         tags.removeAll { $0 == tag }
     }
 
-    func generate(in context: ModelContext) {
+    func generate(in context: ModelContext, engine: EngineService) {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             state = .failed("Prompt is required.")
             return
@@ -86,6 +86,9 @@ final class GenerationViewModel {
 
         generationTask = Task {
             do {
+                progressMessage = "Starting inference engine..."
+                try await engine.prepareForGeneration()
+
                 let submission = try await inferenceService.generate(request)
                 currentJobID = submission.jobID
                 state = .generating
@@ -106,8 +109,13 @@ final class GenerationViewModel {
     func cancel() {
         generationTask?.cancel()
         if let currentJobID {
+            let jobID = currentJobID
             Task {
-                try? await inferenceService.cancel(jobID: currentJobID)
+                do {
+                    try await inferenceService.cancel(jobID: jobID)
+                } catch {
+                    log.warning("Server cancel request failed for job \(jobID): \(error.localizedDescription)", category: .generation)
+                }
             }
         }
         log.info("Generation cancelled by user", category: .generation)
@@ -144,6 +152,10 @@ final class GenerationViewModel {
 
                 if status.status == "failed" {
                     throw NSError(domain: "Auralux", code: -1, userInfo: [NSLocalizedDescriptionKey: status.message ?? "Generation failed"])
+                }
+
+                if status.status == "cancelled" {
+                    throw CancellationError()
                 }
 
                 if status.status == "completed" {

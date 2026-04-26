@@ -2,7 +2,9 @@ import Foundation
 
 enum FileUtilities {
     static var appSupportDirectory: URL {
-        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            fatalError("Application Support directory is unavailable — cannot proceed.")
+        }
         let appURL = baseURL.appendingPathComponent(AppConstants.appName, isDirectory: true)
         if !FileManager.default.fileExists(atPath: appURL.path) {
             try? FileManager.default.createDirectory(at: appURL, withIntermediateDirectories: true)
@@ -20,6 +22,14 @@ enum FileUtilities {
 
     static var generatedAudioDirectory: URL {
         let url = appSupportDirectory.appendingPathComponent(AppConstants.generatedDirectoryName, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+        return url
+    }
+
+    static var diagnosticsDirectory: URL {
+        let url = appSupportDirectory.appendingPathComponent(AppConstants.diagnosticsDirectoryName, isDirectory: true)
         if !FileManager.default.fileExists(atPath: url.path) {
             try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         }

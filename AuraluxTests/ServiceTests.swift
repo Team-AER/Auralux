@@ -145,6 +145,11 @@ final class ServiceTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
     }
 
+    func testDiagnosticsDirectoryExists() {
+        let url = FileUtilities.diagnosticsDirectory
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    }
+
     // MARK: - GenerationQueueItem Priority Comparable
 
     func testPriorityComparable() {

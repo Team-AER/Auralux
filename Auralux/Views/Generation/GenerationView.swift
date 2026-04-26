@@ -7,7 +7,11 @@ struct GenerationView: View {
     @State private var tagText = ""
 
     private var engineReady: Bool {
-        engine.state.isReady || engine.state.isRunning
+        engine.state.isReady
+    }
+
+    private var generateDisabled: Bool {
+        viewModel.state.isBusy || engine.state.isBusy || engine.isControlActionRunning
     }
 
     var body: some View {
@@ -36,10 +40,10 @@ struct GenerationView: View {
 
                 HStack {
                     Button("Generate") {
-                        viewModel.generate(in: modelContext)
+                        viewModel.generate(in: modelContext, engine: engine)
                     }
                     .keyboardShortcut("g", modifiers: [.command])
-                    .disabled(viewModel.state.isBusy || !engineReady)
+                    .disabled(generateDisabled)
                     .accessibilityIdentifier("generate-button")
 
                     Button("Cancel") {
@@ -104,6 +108,11 @@ struct GenerationView: View {
                     Task { await engine.runSetup() }
                 }
                 .controlSize(.small)
+            } else if engine.state.isStopped {
+                Button("Start Now") {
+                    Task { await engine.startServer() }
+                }
+                .controlSize(.small)
             } else if case .error = engine.state {
                 Button("Retry") {
                     Task { await engine.startServer() }
@@ -135,6 +144,7 @@ struct GenerationView: View {
         switch engine.state {
         case .notSetup: return "Engine Not Configured"
         case .settingUp: return "Setting Up..."
+        case .stopped: return "Engine Idle"
         case .starting: return "Server Starting..."
         case .error: return "Engine Error"
         default: return "Engine Not Ready"
@@ -147,6 +157,8 @@ struct GenerationView: View {
             return "Set up the inference engine to start generating music."
         case .settingUp(let progress):
             return progress
+        case .stopped:
+            return "The server stays offline until you generate audio. Starting generation will launch it automatically."
         case .starting:
             return "The inference server is starting up. This may take a moment."
         case .error(let message):

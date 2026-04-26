@@ -33,15 +33,6 @@ struct ContentView: View {
 
             // Check engine status on launch
             await engineService.checkStatus()
-
-            if !engineService.state.isReady && !engineService.state.isRunning {
-                withAnimation { engineService.isOnboarding = true }
-            }
-        }
-        .onChange(of: engineService.state) { _, newState in
-            if newState.isReady {
-                withAnimation { engineService.isOnboarding = false }
-            }
         }
     }
 
@@ -80,13 +71,10 @@ struct ContentView: View {
                 .keyboardShortcut("l", modifiers: [.command, .option])
             }
 
-            ToolbarItem(placement: .automatic) {
-                EngineStatusView()
-            }
+            ToolbarSpacer(.fixed)
 
             ToolbarItem(placement: .automatic) {
-                Text("Auralux")
-                    .font(.headline)
+                EngineStatusView()
             }
         }
     }

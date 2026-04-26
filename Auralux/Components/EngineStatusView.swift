@@ -11,27 +11,25 @@ struct EngineStatusView: View {
         Button {
             showPopover.toggle()
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Circle()
                     .fill(statusColor)
-                    .frame(width: 8, height: 8)
+                    .frame(width: 7, height: 7)
 
                 Text(statusLabel)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .fixedSize()
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.quaternary.opacity(0.5), in: Capsule())
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.glass)
         .fixedSize()
         .popover(isPresented: $showPopover) {
             enginePopover
                 .padding(16)
-                .frame(width: 280)
+                .frame(width: 320)
         }
         .help("Engine status — click for details")
     }
@@ -46,7 +44,7 @@ struct EngineStatusView: View {
             return .orange
         case .error:
             return .red
-        case .notSetup, .unknown:
+        case .notSetup, .unknown, .stopped:
             return .gray
         }
     }
@@ -67,25 +65,19 @@ struct EngineStatusView: View {
             return "Not configured"
         case .unknown:
             return "Checking"
+        case .stopped:
+            return "Idle"
         }
     }
 
     @ViewBuilder
     private var enginePopover: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Inference Engine")
-                    .font(.headline)
-                Spacer()
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 10, height: 10)
-            }
-
-            Divider()
+            EngineControlPanel(isCompact: true)
 
             switch engine.state {
             case .ready:
+                Divider()
                 readyInfo
             case .running:
                 Label("Server running, models loading...", systemImage: "bolt.circle")
@@ -103,11 +95,7 @@ struct EngineStatusView: View {
                         .font(.callout)
                         .lineLimit(2)
                 }
-            case .error(let message):
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.red)
-
+            case .error:
                 Button("Retry") {
                     Task { await engine.startServer() }
                 }
@@ -125,6 +113,10 @@ struct EngineStatusView: View {
                     Text("Checking engine status...")
                         .font(.callout)
                 }
+            case .stopped:
+                Label("Server idle. It will start on demand when you generate audio.", systemImage: "pause.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         }
     }

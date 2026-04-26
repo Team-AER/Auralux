@@ -77,6 +77,10 @@ actor ModelManagerService {
         )
     }
 
+    func isServerHealthy() async -> Bool {
+        await inferenceService.isHealthy()
+    }
+
     /// Whether the server is running and has the DiT model loaded.
     func isModelReady() async -> Bool {
         let status = await fetchModelStatus()
