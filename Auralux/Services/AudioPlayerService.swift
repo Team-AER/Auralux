@@ -33,6 +33,16 @@ final class AudioPlayerService {
         // GCD queue assertion failures during app startup.
     }
 
+    /// Stops playback and shuts down the audio engine. Call from the app lifecycle
+    /// (applicationWillTerminate) — Swift 6 prohibits accessing @MainActor-isolated
+    /// properties from deinit.
+    func shutdown() {
+        stop()  // resets isPlaying, currentTime, cancels progressTask
+        if engine.isRunning { engine.stop() }
+        engineReady = false
+        diagnostics.logInfo("engine_shutdown")
+    }
+
     /// Ensures the audio engine is configured and running.
     /// Called lazily before any audio operation.
     private func ensureEngine() {

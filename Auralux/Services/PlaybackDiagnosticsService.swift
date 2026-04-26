@@ -170,21 +170,26 @@ final class PlaybackDiagnosticsService {
             return nil
         }
 
+        // Write synchronously — snapshots are only triggered on stall/error, so the
+        // engine is already in a degraded state. The write is a few KB of JSON and
+        // completes in microseconds. A background Task would set lastSnapshotURL
+        // before the file exists, causing a race in any caller that reads it immediately.
+        if !fileManager.fileExists(atPath: directory.path) {
+            try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        guard (try? data.write(to: url, options: .atomic)) != nil else {
+            append(.error, name: "snapshot_write_failed", fields: [
+                "reason": reason,
+                "error": "disk write failed"
+            ], timestamp: now)
+            return nil
+        }
+
         lastSnapshotURL = url
         append(.info, name: "snapshot_written", fields: [
             "reason": reason,
             "path": url.path
         ], timestamp: now)
-
-        // Offload directory creation and disk write to a background thread to avoid
-        // blocking the main actor, which stalls AVAudioEngine and causes crashes.
-        Task.detached(priority: .background) {
-            let fm = FileManager.default
-            if !fm.fileExists(atPath: directory.path) {
-                try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
-            }
-            try? data.write(to: url, options: .atomic)
-        }
 
         return url
     }

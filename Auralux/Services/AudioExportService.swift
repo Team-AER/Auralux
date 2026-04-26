@@ -142,10 +142,6 @@ final class AudioExportService: Sendable {
 
         removeExistingFile(at: destination)
 
-        guard let outputFormatDescription = AVAudioFormat(settings: outputSettings) else {
-            throw AudioExportError.transcodingFailed("Cannot create output audio format")
-        }
-
         let asset = AVURLAsset(url: source)
         guard let assetReader = try? AVAssetReader(asset: asset) else {
             throw AudioExportError.transcodingFailed("Cannot create asset reader")
@@ -173,7 +169,9 @@ final class AudioExportService: Sendable {
             throw AudioExportError.transcodingFailed("Cannot create asset writer")
         }
 
-        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: outputSettings, sourceFormatHint: outputFormatDescription.formatDescription)
+        // sourceFormatHint describes the PCM samples we feed in, not the output codec.
+        // Passing the output (compressed) format here was causing AVAssetWriter to fail.
+        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: outputSettings)
         assetWriter.add(writerInput)
 
         assetReader.startReading()
@@ -205,8 +203,14 @@ final class AudioExportService: Sendable {
     private func avFileType(for format: AudioExportFormat) throws -> AVFileType {
         switch format {
         case .wav: return .wav
-        case .flac: return AVFileType(rawValue: "public.flac")
-        case .mp3: return .mp3
+        case .flac:
+            // AVAssetWriter does not support FLAC output — public.flac is absent from
+            // its supported-UTI list and attempting to use it crashes with NSInvalidArgumentException.
+            throw AudioExportError.unsupported
+        case .mp3:
+            // AVAssetWriter does not support MP3 encoding (licensed codec, not
+            // shipped by Apple). public.mp3 is absent from its supported-UTI list.
+            throw AudioExportError.unsupported
         case .aac: return .m4a
         case .alac: return .m4a
         }

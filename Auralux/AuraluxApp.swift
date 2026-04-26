@@ -61,6 +61,7 @@ struct AuraluxApp: App {
                 .environment(engineService)
                 .onAppear {
                     appDelegate.onTerminate = {
+                        playerViewModel.playerService.shutdown()
                         engineService.shutdown()
                     }
                 }
