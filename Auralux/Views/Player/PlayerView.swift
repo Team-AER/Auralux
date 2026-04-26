@@ -39,11 +39,14 @@ struct PlayerView: View {
                     viewModel.playPause()
                 }
                 .keyboardShortcut(.space, modifiers: [])
+                .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
                 .accessibilityIdentifier("play-pause-button")
+                .disabled(viewModel.errorMessage != nil)
 
                 Button("Stop") {
                     viewModel.stop()
                 }
+                .disabled(viewModel.errorMessage != nil)
 
                 Button("Capture RCA Log") {
                     _ = viewModel.capturePlaybackDiagnostics(reason: "manual_capture_button")

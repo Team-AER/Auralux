@@ -17,6 +17,7 @@ struct TagChip: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Remove \(tag)")
             }
         }
         .padding(.horizontal, 10)

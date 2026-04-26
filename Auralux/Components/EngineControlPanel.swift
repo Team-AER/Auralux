@@ -46,7 +46,9 @@ struct EngineControlPanel: View {
             }
             .buttonStyle(.borderless)
             .disabled(engine.isControlActionRunning)
+            .opacity(engine.isControlActionRunning ? 0.5 : 1)
             .help("Refresh engine status")
+            .accessibilityLabel("Refresh engine status")
         }
     }
 
@@ -80,6 +82,7 @@ struct EngineControlPanel: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+        .opacity(engine.isControlActionRunning ? 0.5 : 1)
     }
 
     private var statsSection: some View {

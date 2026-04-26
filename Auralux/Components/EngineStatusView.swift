@@ -26,6 +26,7 @@ struct EngineStatusView: View {
         }
         .buttonStyle(.glass)
         .fixedSize()
+        .accessibilityLabel("Engine status: \(statusLabel)")
         .popover(isPresented: $showPopover) {
             enginePopover
                 .padding(16)

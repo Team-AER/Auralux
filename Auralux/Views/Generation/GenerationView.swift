@@ -5,6 +5,7 @@ struct GenerationView: View {
     @Environment(EngineService.self) private var engine
     @Environment(\.modelContext) private var modelContext
     @State private var tagText = ""
+    @State private var completionDismissTask: Task<Void, Never>?
 
     private var engineReady: Bool {
         engine.state.isReady
@@ -71,10 +72,32 @@ struct GenerationView: View {
                         Label("Done", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                             .accessibilityIdentifier("generation-status")
+                            .onAppear {
+                                completionDismissTask?.cancel()
+                                completionDismissTask = Task {
+                                    try? await Task.sleep(for: .seconds(3))
+                                    if !Task.isCancelled {
+                                        viewModel.state = .idle
+                                    }
+                                }
+                            }
+                            .onDisappear {
+                                completionDismissTask?.cancel()
+                            }
                     case .failed(let message):
-                        Label(message, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                            .accessibilityIdentifier("generation-status")
+                        HStack(spacing: 6) {
+                            Label(message, systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                                .accessibilityIdentifier("generation-status")
+                            Button {
+                                viewModel.state = .idle
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Dismiss error")
+                        }
                     case .idle:
                         EmptyView()
                     }

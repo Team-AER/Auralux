@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ModelSettingsView: View {
+    @Environment(EngineService.self) private var engine
     @State private var modelStatus: ModelStatus = .unknown
     @State private var isDownloading = false
     @State private var errorMessage: String?
@@ -46,9 +47,7 @@ struct ModelSettingsView: View {
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     } else if isDownloading {
-                        Text("Downloading models …")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        downloadProgressLabel
                     } else {
                         Text("Server running, models not loaded")
                             .font(.callout)
@@ -78,6 +77,37 @@ struct ModelSettingsView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    // MARK: - Download Progress
+
+    @ViewBuilder
+    private var downloadProgressLabel: some View {
+        if case .settingUp(let progress) = engine.state {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(progress)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                if let pct = parsePercent(from: progress) {
+                    ProgressView(value: Double(pct), total: 100)
+                        .frame(width: 160)
+                        .controlSize(.small)
+                }
+            }
+        } else {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Downloading models …")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func parsePercent(from string: String) -> Int? {
+        guard let range = string.range(of: #"\d+"#, options: .regularExpression),
+              let value = Int(string[range]) else { return nil }
+        return value
     }
 
     // MARK: - Model List

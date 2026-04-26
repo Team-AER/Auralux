@@ -14,13 +14,33 @@ struct HistoryBrowserView: View {
                         viewModel.refresh(context: modelContext)
                     }
 
+                if !viewModel.query.isEmpty {
+                    Button("Clear") {
+                        viewModel.query = ""
+                        viewModel.refresh(context: modelContext)
+                    }
+                    .controlSize(.small)
+                }
+
                 Button("Refresh") {
                     viewModel.refresh(context: modelContext)
                 }
             }
 
             if viewModel.tracks.isEmpty {
-                ContentUnavailableView("No Generations Yet", systemImage: "music.note.list", description: Text("Generated tracks will appear here."))
+                if viewModel.query.isEmpty {
+                    ContentUnavailableView(
+                        "No Generations Yet",
+                        systemImage: "music.note.list",
+                        description: Text("Generated tracks will appear here.")
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "No Matches",
+                        systemImage: "magnifyingglass",
+                        description: Text("No tracks match \"\(viewModel.query)\".")
+                    )
+                }
             } else {
                 List(viewModel.tracks, selection: Bindable(viewModel).selectedTrack) { track in
                     HistoryItemView(track: track)
@@ -38,10 +58,8 @@ struct HistoryBrowserView: View {
         .onAppear {
             viewModel.refresh(context: modelContext)
         }
-        .onChange(of: viewModel.query) { _, newValue in
-            if newValue.isEmpty {
-                viewModel.refresh(context: modelContext)
-            }
+        .onChange(of: viewModel.query) { _, _ in
+            viewModel.refresh(context: modelContext)
         }
     }
 }

@@ -8,6 +8,7 @@ struct SetupView: View {
     @State private var activeStep: Step?
     @State private var detailText = ""
     @State private var hasError = false
+    @State private var setupTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,7 +43,11 @@ struct SetupView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.15), radius: 24, y: 8)
         .task {
-            await runAllSteps()
+            setupTask = Task { await runAllSteps() }
+            await setupTask?.value
+        }
+        .onDisappear {
+            setupTask?.cancel()
         }
         .onChange(of: engine.state) { _, newState in
             updateDetailText(for: newState)
@@ -215,7 +220,8 @@ struct SetupView: View {
         }
         hasError = false
         detailText = ""
-        Task { await runAllSteps() }
+        setupTask?.cancel()
+        setupTask = Task { await runAllSteps() }
     }
 
     private func updateDetailText(for newState: EngineState) {

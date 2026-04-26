@@ -17,6 +17,10 @@ struct ParameterControlsView: View {
                     TextField("Random", text: $seedText)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 240)
+                        .onChange(of: seedText) { _, newValue in
+                            let digits = newValue.filter(\.isNumber)
+                            if digits != newValue { seedText = digits }
+                        }
                 }
             }
         }

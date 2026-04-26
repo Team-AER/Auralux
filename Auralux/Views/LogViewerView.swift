@@ -10,6 +10,7 @@ struct LogViewerView: View {
     @State private var filterCategory: LogCategory? = nil
     @State private var searchText = ""
     @State private var autoScroll = true
+    @State private var scrollTask: Task<Void, Never>?
 
     private var filteredEntries: [LogEntry] {
         logger.entries.filter { entry in
@@ -99,7 +100,11 @@ struct LogViewerView: View {
             .listStyle(.plain)
             .font(.system(.caption, design: .monospaced))
             .onChange(of: filteredEntries.count) { _, _ in
-                if autoScroll, let last = filteredEntries.last {
+                guard autoScroll else { return }
+                scrollTask?.cancel()
+                scrollTask = Task {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard !Task.isCancelled, let last = filteredEntries.last else { return }
                     proxy.scrollTo(last.id, anchor: .bottom)
                 }
             }

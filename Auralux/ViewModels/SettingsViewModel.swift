@@ -26,7 +26,10 @@ final class SettingsViewModel {
     var maxConcurrentJobs = 1 {
         didSet {
             let clamped = max(1, min(4, maxConcurrentJobs))
-            if maxConcurrentJobs != clamped { maxConcurrentJobs = clamped }
+            if maxConcurrentJobs != clamped {
+                maxConcurrentJobs = clamped  // triggers didSet once more with clamped value
+                return
+            }
             save(key: Keys.maxConcurrentJobs, value: clamped)
         }
     }
