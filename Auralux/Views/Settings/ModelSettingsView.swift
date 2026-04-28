@@ -96,7 +96,7 @@ struct ModelSettingsView: View {
     @ViewBuilder
     private var modelListSection: some View {
         VStack(spacing: 0) {
-            let artifacts = [ModelManagerService.mlxArtifact] + ModelManagerService.upstreamVariants
+            let artifacts = ModelManagerService.mlxArtifacts
             ForEach(artifacts) { artifact in
                 modelRow(artifact)
                 if artifact.id != artifacts.last?.id {

@@ -138,10 +138,42 @@ def _remap_decoder_key(rest: str) -> str:
 def _remap_dit_key(key: str) -> Optional[str]:
     """Map a checkpoint key to its Swift MLX module path. Returns None to skip."""
 
-    # ── Skip components not needed for basic inference ─────────────────────
-    if key.startswith("tokenizer."):          # audio FSQ tokenizer
+    # ── Audio tokenizer (tokenizer.*) → audioTokenizer.* ───────────────────
+    # tokenizer.audio_acoustic_proj.*           → audioTokenizer.audioAcousticProj.*
+    # tokenizer.attention_pooler.embed_tokens.* → audioTokenizer.attentionPooler.embedTokens.*
+    # tokenizer.attention_pooler.special_token  → audioTokenizer.attentionPooler.specialToken
+    # tokenizer.attention_pooler.norm.*         → audioTokenizer.attentionPooler.norm.*
+    # tokenizer.attention_pooler.layers.N.*     → audioTokenizer.attentionPooler.layers.N.*
+    # tokenizer.quantizer.project_in.*          → audioTokenizer.quantizer.projectIn.*
+    # tokenizer.quantizer.project_out.*         → audioTokenizer.quantizer.projectOut.*
+    if key.startswith("tokenizer."):
+        rest = key[len("tokenizer."):]
+        if rest.startswith("audio_acoustic_proj."):
+            return "audioTokenizer.audioAcousticProj." + rest[len("audio_acoustic_proj."):]
+        if rest.startswith("attention_pooler."):
+            sub = rest[len("attention_pooler."):]
+            m = re.match(r"^layers\.(\d+)\.(.+)$", sub)
+            if m:
+                idx, layer_sub = m.group(1), m.group(2)
+                return f"audioTokenizer.attentionPooler.layers.{idx}.{_remap_encoder_layer_key(layer_sub)}"
+            top_map = {
+                "embed_tokens":  "embedTokens",
+                "special_token": "specialToken",
+                "norm":          "norm",
+            }
+            parts = sub.split(".", maxsplit=1)
+            head  = parts[0]
+            tail  = ("." + _camel_path(parts[1])) if len(parts) > 1 else ""
+            return "audioTokenizer.attentionPooler." + top_map.get(head, _snake_to_camel(head)) + tail
+        if rest.startswith("quantizer."):
+            sub = rest[len("quantizer."):]
+            sub = sub.replace("project_in.", "projectIn.").replace("project_out.", "projectOut.")
+            return "audioTokenizer.quantizer." + sub
+        # rotary_emb buffers etc. — runtime-derived in Swift, not loaded.
         return None
-    if key.startswith("encoder.attention_pooler."):  # attention pooler
+
+    # ── Skip components not needed for basic inference ─────────────────────
+    if key.startswith("encoder.attention_pooler."):  # only the audio tokenizer pooler is plumbed
         return None
 
     # ── Timbre encoder (encoder.timbre_encoder.*) → timbreEncoder.* ────────
@@ -295,41 +327,49 @@ def _remap_text_encoder_key(key: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# VAE key mapping: PyTorch Oobleck decoder → Swift DCHiFiGANDecoder hierarchy
+# VAE key mapping: PyTorch Oobleck VAE → Swift DCHiFiGAN{Decoder,Encoder}
 # ---------------------------------------------------------------------------
 #
-# Checkpoint prefix "decoder.*" maps to the Swift module tree:
-#   decoder.conv1.*           → conv1.*
-#   decoder.block.N.conv_t1.* → blocks.N.convT1.*
-#   decoder.block.N.res_unitM.*→ blocks.N.resUnitM.*
-#   decoder.block.N.snake1.*  → blocks.N.snake1.*
-#   decoder.snake1.*          → snake1.*
-#   decoder.conv2.*           → conv2.*
-#   encoder.*                 → (skipped — not needed for inference)
+# Decoder prefix "decoder.*" → Swift module tree under `decoder.*`:
+#   decoder.conv1.*           → decoder.conv1.*
+#   decoder.block.N.conv_t1.* → decoder.blocks.N.convT1.*
+#   decoder.block.N.res_unitM.*→ decoder.blocks.N.resUnitM.*
+#   decoder.block.N.snake1.*  → decoder.blocks.N.snake1.*
+#   decoder.snake1.*          → decoder.snake1.*
+#   decoder.conv2.*           → decoder.conv2.*
+#
+# Encoder prefix "encoder.*" → Swift module tree under `encoder.*`:
+#   encoder.conv1.*           → encoder.conv1.*
+#   encoder.block.N.conv1.*   → encoder.blocks.N.conv1.*
+#   encoder.block.N.res_unitM → encoder.blocks.N.resUnitM.*
+#   encoder.block.N.snake1.*  → encoder.blocks.N.snake1.*
+#   encoder.snake1.*          → encoder.snake1.*
+#   encoder.conv2.*           → encoder.conv2.*
 # ---------------------------------------------------------------------------
 
 def _remap_vae_key(key: str) -> Optional[str]:
-    """Map a VAE decoder key (after weight_norm fusion) to its Swift MLX path."""
-    if not key.startswith("decoder."):
-        return None  # skip encoder
+    """Map a VAE encoder/decoder key (after weight_norm fusion) to its Swift path."""
+    for prefix, swift_root in (("decoder.", "decoder"), ("encoder.", "encoder")):
+        if not key.startswith(prefix):
+            continue
+        rest = key[len(prefix):]
 
-    rest = key[len("decoder."):]
+        # Top-level tensors: conv1, conv2, snake1 sit directly under the root.
+        for tok in ("conv1.", "conv2.", "snake1."):
+            if rest.startswith(tok):
+                return f"{swift_root}.{rest}"
 
-    # Top-level tensors: conv1, conv2, snake1
-    for tok in ("conv1.", "conv2.", "snake1."):
-        if rest.startswith(tok):
-            return rest
+        # block.N.* → blocks.N.* (with sub-name remapping for convT1/resUnitM).
+        m = re.match(r"^block\.(\d+)\.(.+)$", rest)
+        if m:
+            idx, sub = m.group(1), m.group(2)
+            sub = sub.replace("conv_t1.", "convT1.")
+            sub = re.sub(r"res_unit(\d+)\.", lambda x: f"resUnit{x.group(1)}.", sub)
+            return f"{swift_root}.blocks.{idx}.{sub}"
 
-    # decoder.block.N.* → blocks.N.*
-    m = re.match(r"^block\.(\d+)\.(.+)$", rest)
-    if m:
-        idx, sub = m.group(1), m.group(2)
-        sub = sub.replace("conv_t1.", "convT1.")
-        sub = re.sub(r"res_unit(\d+)\.", lambda x: f"resUnit{x.group(1)}.", sub)
-        return f"blocks.{idx}.{sub}"
-
-    print(f"  [unknown vae] {key}", file=sys.stderr)
-    return None
+        print(f"  [unknown vae] {key}", file=sys.stderr)
+        return None
+    return None  # not encoder/decoder — silently skip
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +457,35 @@ def _load_safetensors_numpy(path: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Sharded safetensors loader (XL checkpoints: 4 × ~5 GB shards)
+# ---------------------------------------------------------------------------
+
+def _load_sharded_safetensors_numpy(shard_dir: Path) -> Dict[str, Any]:
+    """Load a sharded safetensors checkpoint (model.safetensors.index.json + shards).
+
+    Reads the index JSON, discovers all unique shard filenames, loads each shard
+    sequentially, and merges into a single dict (same contract as
+    `_load_safetensors_numpy`).
+    """
+    index_path = shard_dir / "model.safetensors.index.json"
+    with open(index_path) as f:
+        index = json.load(f)
+
+    # weight_map: {param_name: shard_filename}
+    weight_map: Dict[str, str] = index.get("weight_map", {})
+    shard_files = sorted(set(weight_map.values()))
+    print(f"  Found {len(shard_files)} shard(s) covering {len(weight_map)} tensors")
+
+    merged: Dict[str, Any] = {}
+    for shard_name in shard_files:
+        shard_path = shard_dir / shard_name
+        print(f"  Loading shard {shard_name} …")
+        merged.update(_load_safetensors_numpy(shard_path))
+
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Conversion
 # ---------------------------------------------------------------------------
 
@@ -431,7 +500,13 @@ def _needs_convT1d_transpose(new_key: str, shape: tuple) -> bool:
     return len(shape) == 3 and new_key.endswith(".weight") and "projOut.weight" in new_key
 
 
-def convert_dit(src_safetensors: Path, output_dir: Path, dtype_str: str) -> bool:
+def convert_dit(src: Path, output_dir: Path, dtype_str: str, sharded: bool = False) -> bool:
+    """Convert a DiT checkpoint (single file or sharded) to MLX safetensors.
+
+    `src` is either:
+      - a .safetensors file path  (sharded=False)
+      - the directory containing model.safetensors.index.json  (sharded=True)
+    """
     import numpy as np
     from safetensors.numpy import save_file as save_np
 
@@ -442,8 +517,12 @@ def convert_dit(src_safetensors: Path, output_dir: Path, dtype_str: str) -> bool
     converted: Dict[str, Any] = {}
     skipped = 0
 
-    print(f"  Converting {src_safetensors.name} …")
-    source = _load_safetensors_numpy(src_safetensors)
+    if sharded:
+        print(f"  Loading sharded checkpoint from {src} …")
+        source = _load_sharded_safetensors_numpy(src)
+    else:
+        print(f"  Converting {src.name} …")
+        source = _load_safetensors_numpy(src)
     keys = list(source.keys())
     print(f"  Source tensors: {len(keys)}")
     for key in keys:
@@ -603,9 +682,10 @@ def _fuse_weight_norm(v: "np.ndarray", g: "np.ndarray") -> "np.ndarray":
 
 
 def convert_vae(src_safetensors: Path, output_dir: Path, dtype_str: str) -> bool:
-    """Convert Oobleck VAE decoder weights to MLX format.
+    """Convert Oobleck VAE encoder + decoder weights to MLX format.
 
-    - Only decoder.* keys are kept (encoder is not needed for inference).
+    - Both encoder.* and decoder.* keys are kept. Encoder is needed for the
+      cover/repaint/extract modes that consume user-provided audio.
     - PyTorch weight_norm (weight_v + weight_g pairs) is fused into a single weight.
     - Conv1d weights are transposed [out,in,k] → [out,k,in] for MLX.
     - ConvTranspose1d weights are transposed [in,out,k] → [out,k,in] for MLX.
@@ -625,8 +705,8 @@ def convert_vae(src_safetensors: Path, output_dir: Path, dtype_str: str) -> bool
     for key in sorted(tensors.keys()):
         if key in consumed:
             continue
-        if not key.startswith("decoder."):
-            continue  # skip encoder
+        if not (key.startswith("decoder.") or key.startswith("encoder.")):
+            continue  # skip anything outside encoder/decoder
 
         if key.endswith(".weight_v"):
             base  = key[: -len(".weight_v")]
@@ -810,9 +890,99 @@ def validate_output(output_dir: Path) -> bool:
 # Main
 # ---------------------------------------------------------------------------
 
-def default_output_dir() -> Path:
-    app_support = Path.home() / "Library" / "Application Support" / "Auralux" / "Models"
-    return app_support / "ace-step-v1.5-mlx"
+_MODELS_DIR = Path.home() / "Library" / "Application Support" / "Auralux" / "Models"
+
+# dit_repo:    HuggingFace repo containing the DiT checkpoint.
+# dit_subdir:  Subdirectory within the repo (None = repo root).
+# output_name: Local model directory and HF Team-AER repo suffix.
+# sharded:     True if the DiT uses model.safetensors.index.json + shard files.
+# xl:          True for XL (2560-dim decoder) checkpoints.
+#
+# NOTE: Verify these repo paths against https://huggingface.co/ACE-Step before
+# running — ACE-Step may reorganise or rename repos between releases.
+_VARIANT_CONFIG = {
+    "turbo": {
+        "dit_repo":    "ACE-Step/Ace-Step1.5",
+        "dit_subdir":  "acestep-v15-turbo",
+        "output_name": "ace-step-v1.5-mlx",
+        "sharded":     False,
+        "xl":          False,
+    },
+    "sft": {
+        "dit_repo":    "ACE-Step/Ace-Step1.5",
+        "dit_subdir":  "acestep-v15-sft",
+        "output_name": "ace-step-v1.5-sft-mlx",
+        "sharded":     False,
+        "xl":          False,
+    },
+    "base": {
+        "dit_repo":    "ACE-Step/Ace-Step1.5",
+        "dit_subdir":  "acestep-v15-base",
+        "output_name": "ace-step-v1.5-base-mlx",
+        "sharded":     False,
+        "xl":          False,
+    },
+    "xl-turbo": {
+        "dit_repo":    "ACE-Step/Ace-Step1.5",
+        "dit_subdir":  "acestep-v15-xl-turbo",
+        "output_name": "ace-step-v1.5-xl-turbo-mlx",
+        "sharded":     True,
+        "xl":          True,
+    },
+    "xl-sft": {
+        "dit_repo":    "ACE-Step/Ace-Step1.5",
+        "dit_subdir":  "acestep-v15-xl-sft",
+        "output_name": "ace-step-v1.5-xl-sft-mlx",
+        "sharded":     True,
+        "xl":          True,
+    },
+    "xl-base": {
+        "dit_repo":    "ACE-Step/Ace-Step1.5",
+        "dit_subdir":  "acestep-v15-xl-base",
+        "output_name": "ace-step-v1.5-xl-base-mlx",
+        "sharded":     True,
+        "xl":          True,
+    },
+}
+
+
+def default_output_dir(variant: str) -> Path:
+    return _MODELS_DIR / _VARIANT_CONFIG[variant]["output_name"]
+
+
+def _symlink_shared_components(out_dir: Path, turbo_dir: Path) -> None:
+    """Symlink VAE, LM, text, and silence_latent from the turbo output dir.
+
+    The SFT checkpoint shares all non-DiT components with turbo.
+    Relative symlinks keep the directory relocatable.
+    """
+    for subdir in ("vae", "lm", "text"):
+        src = turbo_dir / subdir
+        dst = out_dir / subdir
+        if dst.is_symlink() or dst.exists():
+            if dst.is_symlink():
+                dst.unlink()
+            else:
+                shutil.rmtree(dst)
+        if src.exists():
+            rel = os.path.relpath(src, out_dir)
+            os.symlink(rel, dst)
+            print(f"  Symlinked {subdir}/ → {rel}")
+        else:
+            print(f"  WARNING: turbo {subdir}/ not found at {src} — run turbo conversion first.")
+
+    # silence_latent lives under dit/
+    src_silence = turbo_dir / "dit" / "silence_latent.safetensors"
+    dst_silence = out_dir / "dit" / "silence_latent.safetensors"
+    dst_silence.parent.mkdir(parents=True, exist_ok=True)
+    if dst_silence.is_symlink() or dst_silence.exists():
+        dst_silence.unlink()
+    if src_silence.exists():
+        rel = os.path.relpath(src_silence, dst_silence.parent)
+        os.symlink(rel, dst_silence)
+        print(f"  Symlinked dit/silence_latent.safetensors → {rel}")
+    else:
+        print(f"  WARNING: turbo silence_latent not found at {src_silence} — run turbo conversion first.")
 
 
 def main() -> int:
@@ -820,9 +990,17 @@ def main() -> int:
         description="Download and convert ACE-Step v1.5 weights to MLX format"
     )
     parser.add_argument(
+        "--variant",
+        choices=list(_VARIANT_CONFIG.keys()),
+        default="turbo",
+        help="Which DiT checkpoint to convert (default: turbo). All non-turbo variants "
+             "symlink shared components (VAE/LM/text/silence_latent) from the turbo "
+             "output directory, so convert turbo first.",
+    )
+    parser.add_argument(
         "--output-dir",
-        default=str(default_output_dir()),
-        help=f"Output directory (default: {default_output_dir()})",
+        default=None,
+        help="Output directory (default: ~/Library/Application Support/Auralux/Models/<variant>/)",
     )
     parser.add_argument(
         "--dtype",
@@ -849,13 +1027,16 @@ def main() -> int:
         "--skip-dit", action="store_true", help="Skip DiT download + conversion"
     )
     parser.add_argument(
-        "--skip-lm", action="store_true", help="Skip LM download + conversion"
+        "--skip-lm", action="store_true",
+        help="Skip LM download + conversion (ignored for non-turbo variants — shared via symlink)"
     )
     parser.add_argument(
-        "--skip-vae", action="store_true", help="Skip VAE download + conversion"
+        "--skip-vae", action="store_true",
+        help="Skip VAE download + conversion (ignored for non-turbo variants — shared via symlink)"
     )
     parser.add_argument(
-        "--skip-text", action="store_true", help="Skip text-encoder (Qwen3-Embedding) download + conversion"
+        "--skip-text", action="store_true",
+        help="Skip text-encoder download + conversion (ignored for non-turbo variants — shared via symlink)"
     )
     parser.add_argument(
         "--cache-dir",
@@ -867,9 +1048,12 @@ def main() -> int:
     if not _check_deps():
         return 1
 
-    out_dir   = Path(args.output_dir)
-    cache_dir = Path(args.cache_dir)
-    token     = args.hf_token
+    variant    = args.variant
+    vcfg       = _VARIANT_CONFIG[variant]
+    out_dir    = Path(args.output_dir) if args.output_dir else default_output_dir(variant)
+    turbo_dir  = _MODELS_DIR / _VARIANT_CONFIG["turbo"]["output_name"]
+    cache_dir  = Path(args.cache_dir)
+    token      = args.hf_token
 
     # ── Validate-only mode ────────────────────────────────────────────────────
     if args.validate_only:
@@ -891,98 +1075,137 @@ def main() -> int:
 
     # ── DiT conversion ────────────────────────────────────────────────────────
     if not args.skip_dit:
-        dit_cache = cache_dir / "dit"
-        dit_src   = dit_cache / "acestep-v15-turbo" / "model.safetensors"
+        dit_subdir = vcfg["dit_subdir"]
+        dit_repo   = vcfg["dit_repo"]
+        is_sharded = vcfg["sharded"]
+        dit_cache  = cache_dir / "dit" / dit_subdir
 
-        if not dit_src.exists():
-            print(f"\n[DiT] Downloading from ACE-Step/Ace-Step1.5 …")
-            _download_dir(
-                repo_id="ACE-Step/Ace-Step1.5",
-                subdir="acestep-v15-turbo",
-                local_dir=dit_cache,
-                token=token,
-                patterns=["acestep-v15-turbo/*"],
-            )
+        if is_sharded:
+            # Sharded: look for index file; single-file fallback for completeness.
+            index_file  = dit_cache / "model.safetensors.index.json"
+            single_file = dit_cache / "model.safetensors"
+            needs_download = not index_file.exists() and not single_file.exists()
+            if needs_download:
+                print(f"\n[DiT] Downloading sharded {dit_subdir} from {dit_repo} …")
+                _download_dir(
+                    repo_id=dit_repo,
+                    subdir=dit_subdir,
+                    local_dir=dit_cache.parent,
+                    token=token,
+                    patterns=[f"{dit_subdir}/*"],
+                )
+            if index_file.exists():
+                print(f"\n[DiT] Converting sharded → {out_dir}/dit/ …")
+                ok &= convert_dit(dit_cache, out_dir / "dit", args.dtype, sharded=True)
+            elif single_file.exists():
+                print(f"\n[DiT] Converting single-file (expected sharded) → {out_dir}/dit/ …")
+                ok &= convert_dit(single_file, out_dir / "dit", args.dtype, sharded=False)
+            else:
+                print(f"ERROR: DiT weights not found in {dit_cache}", file=sys.stderr)
+                ok = False
+        else:
+            dit_src = dit_cache / "model.safetensors"
+            if not dit_src.exists():
+                print(f"\n[DiT] Downloading {dit_subdir} from {dit_repo} …")
+                _download_dir(
+                    repo_id=dit_repo,
+                    subdir=dit_subdir,
+                    local_dir=dit_cache.parent,
+                    token=token,
+                    patterns=[f"{dit_subdir}/*"],
+                )
+            if dit_src.exists():
+                print(f"\n[DiT] Converting → {out_dir}/dit/ …")
+                ok &= convert_dit(dit_src, out_dir / "dit", args.dtype, sharded=False)
+            else:
+                print(f"ERROR: DiT weights not found at {dit_src}", file=sys.stderr)
+                ok = False
 
-        if dit_src.exists():
-            print(f"\n[DiT] Converting → {out_dir}/dit/ …")
-            ok &= convert_dit(dit_src, out_dir / "dit", args.dtype)
-            silence_src = dit_cache / "acestep-v15-turbo" / "silence_latent.pt"
+    # ── Shared components: convert for turbo, symlink for others ─────────────
+    is_turbo = variant == "turbo"
+
+    if is_turbo:
+        # Turbo: convert silence_latent alongside the DiT weights.
+        if not args.skip_dit:
+            dit_subdir  = vcfg["dit_subdir"]
+            silence_src = cache_dir / "dit" / dit_subdir / "silence_latent.pt"
             if silence_src.exists():
                 ok &= convert_silence_latent(silence_src, out_dir / "dit", args.dtype)
             else:
                 print(f"ERROR: silence_latent.pt not found at {silence_src}", file=sys.stderr)
                 ok = False
-        else:
-            print(f"ERROR: DiT weights not found at {dit_src}", file=sys.stderr)
-            ok = False
 
-    # ── LM conversion ─────────────────────────────────────────────────────────
-    if not args.skip_lm:
-        lm_cache = cache_dir / "lm"
-        lm_src   = lm_cache / "model.safetensors"
+        # ── LM conversion ─────────────────────────────────────────────────────
+        if not args.skip_lm:
+            lm_cache = cache_dir / "lm"
+            lm_src   = lm_cache / "model.safetensors"
 
-        if not lm_src.exists():
-            print(f"\n[LM] Downloading from ACE-Step/acestep-5Hz-lm-0.6B …")
-            _download_dir(
-                repo_id="ACE-Step/acestep-5Hz-lm-0.6B",
-                subdir=None,
-                local_dir=lm_cache,
-                token=token,
-                patterns=["*.safetensors", "*.json", "*.txt", "*.jinja"],
-            )
+            if not lm_src.exists():
+                print(f"\n[LM] Downloading from ACE-Step/acestep-5Hz-lm-0.6B …")
+                _download_dir(
+                    repo_id="ACE-Step/acestep-5Hz-lm-0.6B",
+                    subdir=None,
+                    local_dir=lm_cache,
+                    token=token,
+                    patterns=["*.safetensors", "*.json", "*.txt", "*.jinja"],
+                )
 
-        if lm_src.exists():
-            print(f"\n[LM] Converting → {out_dir}/lm/ …")
-            ok &= convert_lm(lm_src, out_dir / "lm", args.dtype)
-            copy_tokenizer(lm_cache, out_dir / "lm")
-        else:
-            print(f"ERROR: LM weights not found at {lm_src}", file=sys.stderr)
-            ok = False
+            if lm_src.exists():
+                print(f"\n[LM] Converting → {out_dir}/lm/ …")
+                ok &= convert_lm(lm_src, out_dir / "lm", args.dtype)
+                copy_tokenizer(lm_cache, out_dir / "lm")
+            else:
+                print(f"ERROR: LM weights not found at {lm_src}", file=sys.stderr)
+                ok = False
 
-    # ── VAE conversion ────────────────────────────────────────────────────────
-    if not args.skip_vae:
-        vae_cache = cache_dir / "vae"
-        vae_src   = vae_cache / "vae" / "diffusion_pytorch_model.safetensors"
+        # ── VAE conversion ────────────────────────────────────────────────────
+        if not args.skip_vae:
+            vae_cache = cache_dir / "vae"
+            vae_src   = vae_cache / "vae" / "diffusion_pytorch_model.safetensors"
 
-        if not vae_src.exists():
-            print(f"\n[VAE] Downloading from ACE-Step/Ace-Step1.5 …")
-            _download(
-                repo_id="ACE-Step/Ace-Step1.5",
-                filename="vae/diffusion_pytorch_model.safetensors",
-                local_dir=str(vae_cache),
-                token=token,
-            )
+            if not vae_src.exists():
+                print(f"\n[VAE] Downloading from ACE-Step/Ace-Step1.5 …")
+                _download(
+                    repo_id="ACE-Step/Ace-Step1.5",
+                    filename="vae/diffusion_pytorch_model.safetensors",
+                    local_dir=str(vae_cache),
+                    token=token,
+                )
 
-        if vae_src.exists():
-            print(f"\n[VAE] Converting → {out_dir}/vae/ …")
-            ok &= convert_vae(vae_src, out_dir / "vae", args.dtype)
-        else:
-            print(f"ERROR: VAE weights not found at {vae_src}", file=sys.stderr)
-            ok = False
+            if vae_src.exists():
+                print(f"\n[VAE] Converting → {out_dir}/vae/ …")
+                ok &= convert_vae(vae_src, out_dir / "vae", args.dtype)
+            else:
+                print(f"ERROR: VAE weights not found at {vae_src}", file=sys.stderr)
+                ok = False
 
-    # ── Text encoder conversion (Qwen3-Embedding-0.6B) ───────────────────────
-    if not args.skip_text:
-        text_cache = cache_dir / "text"
-        text_src   = text_cache / "Qwen3-Embedding-0.6B" / "model.safetensors"
+        # ── Text encoder conversion (Qwen3-Embedding-0.6B) ───────────────────
+        if not args.skip_text:
+            text_cache = cache_dir / "text"
+            text_src   = text_cache / "Qwen3-Embedding-0.6B" / "model.safetensors"
 
-        if not text_src.exists():
-            print(f"\n[Text] Downloading Qwen3-Embedding-0.6B from ACE-Step/Ace-Step1.5 …")
-            _download_dir(
-                repo_id="ACE-Step/Ace-Step1.5",
-                subdir="Qwen3-Embedding-0.6B",
-                local_dir=text_cache,
-                token=token,
-                patterns=["Qwen3-Embedding-0.6B/*"],
-            )
+            if not text_src.exists():
+                print(f"\n[Text] Downloading Qwen3-Embedding-0.6B from ACE-Step/Ace-Step1.5 …")
+                _download_dir(
+                    repo_id="ACE-Step/Ace-Step1.5",
+                    subdir="Qwen3-Embedding-0.6B",
+                    local_dir=text_cache,
+                    token=token,
+                    patterns=["Qwen3-Embedding-0.6B/*"],
+                )
 
-        if text_src.exists():
-            print(f"\n[Text] Converting → {out_dir}/text/ …")
-            ok &= convert_text_encoder(text_src, out_dir / "text", args.dtype)
-            copy_text_tokenizer(text_src.parent, out_dir / "text")
-        else:
-            print(f"ERROR: Text-encoder weights not found at {text_src}", file=sys.stderr)
-            ok = False
+            if text_src.exists():
+                print(f"\n[Text] Converting → {out_dir}/text/ …")
+                ok &= convert_text_encoder(text_src, out_dir / "text", args.dtype)
+                copy_text_tokenizer(text_src.parent, out_dir / "text")
+            else:
+                print(f"ERROR: Text-encoder weights not found at {text_src}", file=sys.stderr)
+                ok = False
+
+    else:
+        # Non-turbo: symlink shared components from the turbo output dir.
+        print(f"\n[Shared] Symlinking VAE / LM / text / silence_latent from turbo dir …")
+        _symlink_shared_components(out_dir, turbo_dir)
 
     # ── Validate output ───────────────────────────────────────────────────────
     if ok:
@@ -991,7 +1214,9 @@ def main() -> int:
 
     if ok:
         print(f"\n✓ All done → {out_dir}")
-        print(f"  Launch Auralux — it will detect the weights automatically.")
+        if not is_turbo:
+            print(f"  Shared components are symlinked from {turbo_dir}")
+        print(f"  Launch Auralux and select the '{variant}' DiT variant in Settings.")
         return 0
     else:
         print(f"\n✗ Conversion had errors. See above.", file=sys.stderr)

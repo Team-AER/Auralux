@@ -29,6 +29,17 @@ final class GenerationViewModel {
     var variance: Double = GenerationParameters.default.variance
     var seedText = ""
 
+    // ── DiT knobs (mirror GenerationParameters) ─────────────────────────────
+    var mode: GenerationMode = .text2music
+    var numSteps: Int = 8
+    var scheduleShift: Double = 1.0
+    var cfgScale: Double = 1.0
+    var referAudioURL: URL?
+    var sourceAudioURL: URL?
+    /// Time-ranges (seconds) to repaint. Frames inside any range are
+    /// regenerated; everything else is kept from the source audio.
+    var repaintRanges: [RepaintRange] = []
+
     var state: GenerationState = .idle
     var progress: Double = 0
     var progressMessage: String = ""
@@ -41,6 +52,16 @@ final class GenerationViewModel {
 
     init(engine: NativeInferenceEngine) {
         self.engine = engine
+    }
+
+    /// Seed the per-request controls from saved settings. Called by the view
+    /// when it appears so users see their configured defaults; per-request
+    /// edits stay in this VM and don't leak back into settings.
+    func applyDefaults(from settings: SettingsViewModel) {
+        mode = settings.defaultMode
+        numSteps = settings.defaultNumSteps
+        scheduleShift = settings.defaultScheduleShift
+        cfgScale = settings.ditVariant.respectsCFG ? settings.defaultCfgScale : 1.0
     }
 
     func applyPreset(_ preset: Preset) {
@@ -80,7 +101,14 @@ final class GenerationViewModel {
             tags: tags,
             duration: duration,
             variance: variance,
-            seed: Int(seedText)
+            seed: Int(seedText),
+            mode: mode,
+            numSteps: numSteps,
+            scheduleShift: scheduleShift,
+            cfgScale: cfgScale,
+            referAudioURL: referAudioURL,
+            sourceAudioURL: sourceAudioURL,
+            repaintMaskRanges: repaintRanges
         )
 
         log.info("Starting generation: \"\(prompt.prefix(60))\" duration=\(duration)s", category: .generation)

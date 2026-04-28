@@ -2,10 +2,12 @@ import SwiftUI
 
 struct GenerationView: View {
     @Environment(GenerationViewModel.self) private var viewModel
+    @Environment(SettingsViewModel.self) private var settings
     @Environment(NativeInferenceEngine.self) private var engine
     @Environment(\.modelContext) private var modelContext
     @State private var tagText = ""
     @State private var completionDismissTask: Task<Void, Never>?
+    @State private var didSeedDefaults = false
 
     private var engineReady: Bool {
         engine.modelState.isReady
@@ -37,7 +39,7 @@ struct GenerationView: View {
                 }
 
                 LyricEditorView(lyrics: Bindable(viewModel).lyrics)
-                ParameterControlsView(duration: Bindable(viewModel).duration, variance: Bindable(viewModel).variance, seedText: Bindable(viewModel).seedText)
+                ParameterControlsView()
 
                 HStack {
                     Button("Generate") {
@@ -104,6 +106,14 @@ struct GenerationView: View {
                 }
             }
             .padding(20)
+        }
+        .onAppear {
+            // Seed mode/numSteps/shift/cfg from saved settings the first time
+            // the panel appears in this session. Per-request edits stay local
+            // to the GenerationViewModel and don't write back to settings.
+            guard !didSeedDefaults else { return }
+            viewModel.applyDefaults(from: settings)
+            didSeedDefaults = true
         }
     }
 

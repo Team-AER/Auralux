@@ -27,6 +27,46 @@ final class SettingsViewModel {
         didSet { save(key: Keys.useLM, value: useLM) }
     }
 
+    // MARK: - Generation defaults
+    //
+    // These seed a fresh `GenerationParameters` when the user opens a new
+    // request. They are *not* hard limits — the generation panel can override
+    // them per-request.
+
+    var ditVariant: DiTVariant = .turbo {
+        didSet {
+            save(key: Keys.ditVariant, value: ditVariant.rawValue)
+            defaultNumSteps = ditVariant.defaultNumSteps
+            defaultCfgScale = ditVariant.defaultCfgScale
+        }
+    }
+
+    var defaultMode: GenerationMode = .text2music {
+        didSet { save(key: Keys.defaultMode, value: defaultMode.rawValue) }
+    }
+
+    var defaultNumSteps: Int = 8 {
+        didSet {
+            let clamped = max(1, min(ditVariant.maxNumSteps, defaultNumSteps))
+            if defaultNumSteps != clamped {
+                defaultNumSteps = clamped
+                return
+            }
+            save(key: Keys.defaultNumSteps, value: clamped)
+        }
+    }
+
+    /// Valid shifts are {1.0, 2.0, 3.0} per upstream `SHIFT_TIMESTEPS`.
+    var defaultScheduleShift: Double = 1.0 {
+        didSet { save(key: Keys.defaultScheduleShift, value: defaultScheduleShift) }
+    }
+
+    /// Default cfgScale; only respected on non-turbo variants. Turbo logs
+    /// and ignores anything > 1.0 because CFG is distilled into the weights.
+    var defaultCfgScale: Double = 1.0 {
+        didSet { save(key: Keys.defaultCfgScale, value: defaultCfgScale) }
+    }
+
     var autoStartServer = true {
         didSet { save(key: Keys.autoStartServer, value: autoStartServer) }
     }
@@ -60,6 +100,11 @@ final class SettingsViewModel {
         autoStartServer = true
         maxConcurrentJobs = 1
         defaultExportFormat = .wav
+        ditVariant = .turbo
+        defaultMode = .text2music
+        defaultNumSteps = ditVariant.defaultNumSteps
+        defaultScheduleShift = 1.0
+        defaultCfgScale = ditVariant.defaultCfgScale
     }
 
     // MARK: - Persistence
@@ -71,6 +116,11 @@ final class SettingsViewModel {
         static let autoStartServer = "settings.autoStartServer"
         static let maxConcurrentJobs = "settings.maxConcurrentJobs"
         static let defaultExportFormat = "settings.defaultExportFormat"
+        static let ditVariant = "settings.ditVariant"
+        static let defaultMode = "settings.defaultMode"
+        static let defaultNumSteps = "settings.defaultNumSteps"
+        static let defaultScheduleShift = "settings.defaultScheduleShift"
+        static let defaultCfgScale = "settings.defaultCfgScale"
     }
 
     private func loadAll() {
@@ -83,6 +133,24 @@ final class SettingsViewModel {
         }
         if defaults.object(forKey: Keys.useLM) != nil {
             useLM = defaults.bool(forKey: Keys.useLM)
+        }
+        if let raw = defaults.string(forKey: Keys.ditVariant),
+           let variant = DiTVariant(rawValue: raw) {
+            ditVariant = variant
+        }
+        if let raw = defaults.string(forKey: Keys.defaultMode),
+           let mode = GenerationMode(rawValue: raw) {
+            defaultMode = mode
+        }
+        if defaults.object(forKey: Keys.defaultNumSteps) != nil {
+            let stored = defaults.integer(forKey: Keys.defaultNumSteps)
+            defaultNumSteps = max(1, min(ditVariant.maxNumSteps, stored))
+        }
+        if defaults.object(forKey: Keys.defaultScheduleShift) != nil {
+            defaultScheduleShift = defaults.double(forKey: Keys.defaultScheduleShift)
+        }
+        if defaults.object(forKey: Keys.defaultCfgScale) != nil {
+            defaultCfgScale = defaults.double(forKey: Keys.defaultCfgScale)
         }
         if defaults.object(forKey: Keys.autoStartServer) != nil {
             autoStartServer = defaults.bool(forKey: Keys.autoStartServer)

@@ -28,28 +28,44 @@ enum ModelManagerService {
         estimatedSizeGB: 5.2
     )
 
-    // MARK: - Upstream PyTorch variants (reference only — not downloaded in-app)
+    // MARK: - Additional MLX repos (DiT-only; share VAE/LM/text with turbo via symlinks)
 
-    static let upstreamVariants: [ModelArtifact] = [
-        ModelArtifact(
-            name: "acestep-v15-turbo",
-            repoID: "ACE-Step/Ace-Step1.5",
-            description: "DiT 2B Turbo — 8-step inference (upstream PyTorch checkpoint)",
-            estimatedSizeGB: 4.8
-        ),
-        ModelArtifact(
-            name: "acestep-v15-sft",
-            repoID: "ACE-Step/Ace-Step1.5",
-            description: "DiT 2B SFT — 50-step, higher quality than turbo (upstream PyTorch)",
-            estimatedSizeGB: 4.8
-        ),
-        ModelArtifact(
-            name: "acestep-5Hz-lm-0.6B",
-            repoID: "ACE-Step/acestep-5Hz-lm-0.6B",
-            description: "LM 0.6B — CoT metadata + prompt rewriting (upstream PyTorch)",
-            estimatedSizeGB: 1.2
-        ),
+    static let sftMLXArtifact = ModelArtifact(
+        name: "ace-step-v1.5-sft-mlx",
+        repoID: "Team-AER/ace-step-v1.5-sft-mlx",
+        description: "ACE-Step v1.5 SFT — 60-step flow-matching, MLX-native (DiT 2B; shares VAE/LM/text with turbo)",
+        estimatedSizeGB: 3.5
+    )
+    static let baseMLXArtifact = ModelArtifact(
+        name: "ace-step-v1.5-base-mlx",
+        repoID: "Team-AER/ace-step-v1.5-base-mlx",
+        description: "ACE-Step v1.5 Base — 60-step flow-matching, MLX-native (DiT 2B; shares VAE/LM/text with turbo)",
+        estimatedSizeGB: 3.5
+    )
+    static let xlTurboMLXArtifact = ModelArtifact(
+        name: "ace-step-v1.5-xl-turbo-mlx",
+        repoID: "Team-AER/ace-step-v1.5-xl-turbo-mlx",
+        description: "ACE-Step v1.5 XL Turbo — 8-step CFG-distilled, MLX-native (DiT 5B + LM 0.6B)",
+        estimatedSizeGB: 11.0
+    )
+    static let xlSftMLXArtifact = ModelArtifact(
+        name: "ace-step-v1.5-xl-sft-mlx",
+        repoID: "Team-AER/ace-step-v1.5-xl-sft-mlx",
+        description: "ACE-Step v1.5 XL SFT — 60-step flow-matching, MLX-native (DiT 5B; shares VAE/LM/text with turbo)",
+        estimatedSizeGB: 9.0
+    )
+    static let xlBaseMLXArtifact = ModelArtifact(
+        name: "ace-step-v1.5-xl-base-mlx",
+        repoID: "Team-AER/ace-step-v1.5-xl-base-mlx",
+        description: "ACE-Step v1.5 XL Base — 60-step flow-matching, MLX-native (DiT 5B; shares VAE/LM/text with turbo)",
+        estimatedSizeGB: 9.0
+    )
+
+    /// All MLX-native artifacts that the app can load, in display order.
+    static let mlxArtifacts: [ModelArtifact] = [
+        mlxArtifact, sftMLXArtifact, baseMLXArtifact,
+        xlTurboMLXArtifact, xlSftMLXArtifact, xlBaseMLXArtifact
     ]
 
-    static let knownArtifacts: [ModelArtifact] = [mlxArtifact] + upstreamVariants
+    static let knownArtifacts: [ModelArtifact] = mlxArtifacts
 }

@@ -12,7 +12,7 @@ protocol AudioVAEDecoder: AnyObject {
 }
 
 // MARK: - Snake1d  (x + sin²(exp(α)·x) / exp(β))
-// Learned per-channel activation used throughout the Oobleck decoder.
+// Learned per-channel activation used throughout the Oobleck encoder + decoder.
 
 final class Snake1d: Module, @unchecked Sendable {
     var alpha: MLXArray   // [C]
@@ -95,15 +95,50 @@ final class OobleckDecoderBlock: Module, @unchecked Sendable {
     }
 }
 
+// MARK: - OobleckEncoderBlock  (3 × ResUnit[dil 1,3,9] → Snake → strided Conv)
+
+final class OobleckEncoderBlock: Module, @unchecked Sendable {
+    let resUnit1: OobleckResUnit
+    let resUnit2: OobleckResUnit
+    let resUnit3: OobleckResUnit
+    let snake1:   Snake1d
+    let conv1:    Conv1d
+
+    init(inChannels: Int, outChannels: Int, stride: Int) {
+        resUnit1 = OobleckResUnit(channels: inChannels, dilation: 1)
+        resUnit2 = OobleckResUnit(channels: inChannels, dilation: 3)
+        resUnit3 = OobleckResUnit(channels: inChannels, dilation: 9)
+        snake1   = Snake1d(channels: inChannels)
+        // Mirrors PyTorch `padding=math.ceil(stride/2)` from
+        // `diffusers/models/autoencoders/autoencoder_oobleck.py:OobleckEncoderBlock`.
+        conv1    = Conv1d(
+            inputChannels:  inChannels,
+            outputChannels: outChannels,
+            kernelSize:     stride * 2,
+            stride:         stride,
+            padding:        (stride + 1) / 2
+        )
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        var h = resUnit1(x)
+        h = resUnit2(h)
+        h = resUnit3(h)
+        h = snake1(h)
+        return conv1(h)
+    }
+}
+
 // MARK: - DCHiFiGANDecoder  (Oobleck VAE decoder: latent → 48 kHz stereo audio)
 //
 // Architecture (AutoencoderOobleck from stable_audio_tools):
 //   conv1(64→2048, k=7)
-//   block[0]: 2048→1024, stride=10   (×10 upsample)
-//   block[1]: 1024→512,  stride=6    (×6)
-//   block[2]: 512→256,   stride=4    (×4)
-//   block[3]: 256→128,   stride=4    (×4)
-//   block[4]: 128→128,   stride=2    (×2)
+//   blocks[0]: 2048→1024, stride=10   (×10 upsample)
+//   blocks[1]: 1024→512,  stride=6    (×6)
+//   blocks[2]: 512→256,   stride=4    (×4)
+//   blocks[3]: 256→128,   stride=4    (×4)
+//   blocks[4]: 128→128,   stride=2    (×2)
 //   snake1(128) → conv2(128→2, k=7, no bias)
 //
 // Total upsampling: 10×6×4×4×2 = 1920  →  25 Hz latents → 48 kHz audio
@@ -142,5 +177,85 @@ final class DCHiFiGANDecoder: Module, AudioVAEDecoder, @unchecked Sendable {
         x = conv1(x)
         for block in blocks { x = block(x) }
         return conv2(snake1(x)) // [B, T×1920, 2] stereo
+    }
+}
+
+// MARK: - DCHiFiGANEncoder  (Oobleck VAE encoder: 48 kHz stereo audio → latent)
+//
+// Architecture (mirror of decoder, downsampling instead of upsampling):
+//   conv1(2→128, k=7)
+//   blocks[0]: 128→128,  stride=2
+//   blocks[1]: 128→256,  stride=4
+//   blocks[2]: 256→512,  stride=4
+//   blocks[3]: 512→1024, stride=6
+//   blocks[4]: 1024→2048, stride=10
+//   snake1(2048) → conv2(2048→128, k=3, p=1)
+//
+// Total downsampling: 2×4×4×6×10 = 1920  →  48 kHz audio → 25 Hz pre-Gaussian.
+// The 128-channel output is `[mean (64) | scale (64)]`. Inference takes the
+// mode (i.e. `mean` = first 64 channels); see `OobleckDiagonalGaussianDistribution`
+// in upstream `diffusers/models/autoencoders/autoencoder_oobleck.py`.
+
+final class DCHiFiGANEncoder: Module, @unchecked Sendable {
+
+    let conv1:  Conv1d
+    let blocks: [OobleckEncoderBlock]
+    let snake1: Snake1d
+    let conv2:  Conv1d
+
+    override init() {
+        conv1  = Conv1d(inputChannels: 2, outputChannels: 128, kernelSize: 7, padding: 3)
+        blocks = [
+            OobleckEncoderBlock(inChannels:  128, outChannels:  128, stride:  2),
+            OobleckEncoderBlock(inChannels:  128, outChannels:  256, stride:  4),
+            OobleckEncoderBlock(inChannels:  256, outChannels:  512, stride:  4),
+            OobleckEncoderBlock(inChannels:  512, outChannels: 1024, stride:  6),
+            OobleckEncoderBlock(inChannels: 1024, outChannels: 2048, stride: 10),
+        ]
+        snake1 = Snake1d(channels: 2048)
+        conv2  = Conv1d(inputChannels: 2048, outputChannels: 128, kernelSize: 3, padding: 1)
+        super.init()
+    }
+
+    /// Encode 48 kHz stereo audio into the 25 Hz acoustic latent.
+    ///
+    /// - audio: `[B, T_audio, 2]` float32 in [-1, 1]. Length must be a multiple
+    ///   of 1920 — pad with zeros at the call site if needed.
+    /// - Returns: `[B, T_audio / 1920, 64]` — the *mean* of the diagonal
+    ///   Gaussian. Use this directly as the DiT acoustic latent.
+    func encode(audio: MLXArray) -> MLXArray {
+        var x = audio.asType(.float32)
+        x = conv1(x)
+        for block in blocks { x = block(x) }
+        x = conv2(snake1(x))                  // [B, T_lat, 128]
+        return x[0..., 0..., 0..<64]          // mode = mean (first half of channels)
+    }
+}
+
+// MARK: - DCHiFiGANVAE  (top-level wrapper exposing encode + decode)
+
+/// Top-level Oobleck VAE wrapper. Holds both `encoder` and `decoder`
+/// sub-modules so the converted weight keys (`encoder.*`, `decoder.*`)
+/// load directly with no extra remapping.
+final class DCHiFiGANVAE: Module, AudioVAEDecoder, @unchecked Sendable {
+    let encoder: DCHiFiGANEncoder
+    let decoder: DCHiFiGANDecoder
+
+    override init() {
+        encoder = DCHiFiGANEncoder()
+        decoder = DCHiFiGANDecoder()
+        super.init()
+    }
+
+    /// - latent: [B, T, 64] acoustic latent at 25 Hz
+    /// - Returns: [B, T × 1920, 2] stereo PCM at 48 kHz
+    func decode(latent: MLXArray) -> MLXArray {
+        decoder.decode(latent: latent)
+    }
+
+    /// - audio:  [B, T_audio, 2] float32 stereo PCM at 48 kHz, length multiple of 1920
+    /// - Returns: [B, T_audio / 1920, 64] acoustic latent at 25 Hz
+    func encode(audio: MLXArray) -> MLXArray {
+        encoder.encode(audio: audio)
     }
 }

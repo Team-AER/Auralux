@@ -15,6 +15,7 @@ struct AceStepConfig: Sendable {
     let numLyricEncoderLayers: Int
     let numTimbreEncoderLayers: Int
     let numDetokenizerLayers: Int
+    let numAttentionPoolerLayers: Int
     let patchSize: Int
     let poolWindowSize: Int
     let audioAcousticHiddenDim: Int
@@ -27,7 +28,24 @@ struct AceStepConfig: Sendable {
     let slidingWindow: Int
     let useSlidingWindow: Bool
 
+    // FSQ / audio tokenizer configuration
+    let fsqDim: Int
+    let fsqInputLevels: [Int]
+    let fsqInputNumQuantizers: Int
+
+    // Encoder-specific dimensions (default to main DiT dimensions when nil).
+    // XL variants have a smaller encoder stack than the DiT decoder.
+    let encoderHiddenSize: Int
+    let encoderNumHeads: Int
+    let encoderNumKVHeads: Int
+    let encoderIntermediateSize: Int
+
+    /// True for the turbo checkpoint (CFG distilled into weights via `time_embed_r`).
+    /// False for SFT / base (standard two-pass CFG at inference time).
+    let usesCFGDistillation: Bool
+
     init(
+        usesCFGDistillation: Bool    = true,
         hiddenSize: Int              = 2048,
         numHeads: Int                = 16,
         numKVHeads: Int              = 8,
@@ -37,6 +55,7 @@ struct AceStepConfig: Sendable {
         numLyricEncoderLayers: Int   = 8,
         numTimbreEncoderLayers: Int  = 4,
         numDetokenizerLayers: Int    = 2,
+        numAttentionPoolerLayers: Int = 2,
         patchSize: Int               = 2,
         poolWindowSize: Int          = 5,
         audioAcousticHiddenDim: Int  = 64,
@@ -47,8 +66,16 @@ struct AceStepConfig: Sendable {
         textHiddenDim: Int           = 1024,
         freqDim: Int                 = 256,
         slidingWindow: Int           = 128,
-        useSlidingWindow: Bool       = true
+        useSlidingWindow: Bool       = true,
+        fsqDim: Int                  = 6,
+        fsqInputLevels: [Int]        = [8, 8, 8, 5, 5, 5],
+        fsqInputNumQuantizers: Int   = 1,
+        encoderHiddenSize: Int?      = nil,
+        encoderNumHeads: Int?        = nil,
+        encoderNumKVHeads: Int?      = nil,
+        encoderIntermediateSize: Int? = nil
     ) {
+        self.usesCFGDistillation    = usesCFGDistillation
         self.hiddenSize             = hiddenSize
         self.numHeads               = numHeads
         self.numKVHeads             = numKVHeads
@@ -58,6 +85,7 @@ struct AceStepConfig: Sendable {
         self.numLyricEncoderLayers  = numLyricEncoderLayers
         self.numTimbreEncoderLayers = numTimbreEncoderLayers
         self.numDetokenizerLayers   = numDetokenizerLayers
+        self.numAttentionPoolerLayers = numAttentionPoolerLayers
         self.patchSize              = patchSize
         self.poolWindowSize         = poolWindowSize
         self.audioAcousticHiddenDim = audioAcousticHiddenDim
@@ -69,7 +97,39 @@ struct AceStepConfig: Sendable {
         self.freqDim                = freqDim
         self.slidingWindow          = slidingWindow
         self.useSlidingWindow       = useSlidingWindow
+        self.fsqDim                 = fsqDim
+        self.fsqInputLevels         = fsqInputLevels
+        self.fsqInputNumQuantizers   = fsqInputNumQuantizers
+        self.encoderHiddenSize       = encoderHiddenSize       ?? hiddenSize
+        self.encoderNumHeads         = encoderNumHeads         ?? numHeads
+        self.encoderNumKVHeads       = encoderNumKVHeads       ?? numKVHeads
+        self.encoderIntermediateSize = encoderIntermediateSize ?? intermediateSize
     }
+
+    static let turbo   = AceStepConfig(usesCFGDistillation: true)
+    static let sft     = AceStepConfig(usesCFGDistillation: false)
+    static let base    = AceStepConfig(usesCFGDistillation: false)
+    static let xlTurbo = AceStepConfig(
+        usesCFGDistillation: true,
+        hiddenSize: 2560, numHeads: 32, numKVHeads: 8,
+        intermediateSize: 9728, numDiTLayers: 32,
+        encoderHiddenSize: 2048, encoderNumHeads: 16,
+        encoderNumKVHeads: 8, encoderIntermediateSize: 6144
+    )
+    static let xlSft   = AceStepConfig(
+        usesCFGDistillation: false,
+        hiddenSize: 2560, numHeads: 32, numKVHeads: 8,
+        intermediateSize: 9728, numDiTLayers: 32,
+        encoderHiddenSize: 2048, encoderNumHeads: 16,
+        encoderNumKVHeads: 8, encoderIntermediateSize: 6144
+    )
+    static let xlBase  = AceStepConfig(
+        usesCFGDistillation: false,
+        hiddenSize: 2560, numHeads: 32, numKVHeads: 8,
+        intermediateSize: 9728, numDiTLayers: 32,
+        encoderHiddenSize: 2048, encoderNumHeads: 16,
+        encoderNumKVHeads: 8, encoderIntermediateSize: 6144
+    )
 
     // Per-layer attention type — mirrors `configuration_acestep_v15.py:251-254`:
     //   layer_types[i] = "sliding_attention" if (i+1)%2 else "full_attention"
@@ -264,15 +324,15 @@ final class AceStepEncoderLayer: Module, @unchecked Sendable {
     let mlp: SwiGLUMLP
 
     init(config: AceStepConfig) {
-        inputLayernorm         = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        inputLayernorm         = RMSNorm(dimensions: config.encoderHiddenSize, eps: config.rmsNormEps)
         selfAttn               = AceStepAttention(
-            hiddenSize: config.hiddenSize, numHeads: config.numHeads,
-            numKVHeads: config.numKVHeads, headDim: config.headDim,
+            hiddenSize: config.encoderHiddenSize, numHeads: config.encoderNumHeads,
+            numKVHeads: config.encoderNumKVHeads, headDim: config.headDim,
             rmsNormEps: config.rmsNormEps, ropeTheta: config.ropeTheta
         )
-        postAttentionLayernorm = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        mlp                    = SwiGLUMLP(hiddenSize: config.hiddenSize,
-                                           intermediateSize: config.intermediateSize)
+        postAttentionLayernorm = RMSNorm(dimensions: config.encoderHiddenSize, eps: config.rmsNormEps)
+        mlp                    = SwiGLUMLP(hiddenSize: config.encoderHiddenSize,
+                                           intermediateSize: config.encoderIntermediateSize)
         super.init()
     }
 
@@ -359,9 +419,9 @@ final class AceLyricEncoder: Module, @unchecked Sendable {
 
     init(config: AceStepConfig) {
         self.config = config
-        embedTokens = Linear(config.textHiddenDim, config.hiddenSize, bias: true)
+        embedTokens = Linear(config.textHiddenDim, config.encoderHiddenSize, bias: true)
         layers      = (0..<config.numLyricEncoderLayers).map { _ in AceStepEncoderLayer(config: config) }
-        norm        = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        norm        = RMSNorm(dimensions: config.encoderHiddenSize, eps: config.rmsNormEps)
         super.init()
     }
 
@@ -417,10 +477,10 @@ final class AceStepTimbreEncoder: Module, @unchecked Sendable {
 
     init(config: AceStepConfig) {
         self.config  = config
-        embedTokens  = Linear(config.timbreHiddenDim, config.hiddenSize, bias: true)
-        specialToken = MLXArray.zeros([1, 1, config.hiddenSize])
+        embedTokens  = Linear(config.timbreHiddenDim, config.encoderHiddenSize, bias: true)
+        specialToken = MLXArray.zeros([1, 1, config.encoderHiddenSize])
         layers       = (0..<config.numTimbreEncoderLayers).map { _ in AceStepEncoderLayer(config: config) }
-        norm         = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        norm         = RMSNorm(dimensions: config.encoderHiddenSize, eps: config.rmsNormEps)
         super.init()
     }
 
@@ -466,11 +526,11 @@ final class AceAudioDetokenizer: Module, @unchecked Sendable {
     let projOut: Linear
 
     init(config: AceStepConfig) {
-        embedTokens   = Linear(config.hiddenSize, config.hiddenSize, bias: true)
-        specialTokens = MLXArray.zeros([1, config.poolWindowSize, config.hiddenSize])
+        embedTokens   = Linear(config.encoderHiddenSize, config.encoderHiddenSize, bias: true)
+        specialTokens = MLXArray.zeros([1, config.poolWindowSize, config.encoderHiddenSize])
         layers        = (0..<config.numDetokenizerLayers).map { _ in AceStepEncoderLayer(config: config) }
-        norm          = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        projOut       = Linear(config.hiddenSize, config.audioAcousticHiddenDim, bias: true)
+        norm          = RMSNorm(dimensions: config.encoderHiddenSize, eps: config.rmsNormEps)
+        projOut       = Linear(config.encoderHiddenSize, config.audioAcousticHiddenDim, bias: true)
         super.init()
     }
 
@@ -496,7 +556,9 @@ final class AceAudioDetokenizer: Module, @unchecked Sendable {
 
 final class AceStepDiTModel: Module, @unchecked Sendable {
     let timeEmbed: TimestepEmbedder
-    let timeEmbedR: TimestepEmbedder
+    /// Turbo-only: residual timestep embedder for CFG distillation.
+    /// Nil for SFT / base variants.
+    let timeEmbedR: TimestepEmbedder?
     let conditionEmbedder: Linear
     let projIn: Conv1d
     let layers: [AceStepDiTLayer]
@@ -510,8 +572,10 @@ final class AceStepDiTModel: Module, @unchecked Sendable {
         self.config       = config
         patchSize         = config.patchSize
         timeEmbed         = TimestepEmbedder(freqDim: config.freqDim, hiddenSize: config.hiddenSize)
-        timeEmbedR        = TimestepEmbedder(freqDim: config.freqDim, hiddenSize: config.hiddenSize)
-        conditionEmbedder = Linear(config.hiddenSize, config.hiddenSize, bias: true)
+        timeEmbedR        = config.usesCFGDistillation
+            ? TimestepEmbedder(freqDim: config.freqDim, hiddenSize: config.hiddenSize)
+            : nil
+        conditionEmbedder = Linear(config.encoderHiddenSize, config.hiddenSize, bias: true)
         projIn            = Conv1d(
             inputChannels:  config.inChannels,
             outputChannels: config.hiddenSize,
@@ -576,9 +640,18 @@ final class AceStepDiTModel: Module, @unchecked Sendable {
 
         // Timestep embeddings: temb [B, H], proj [B, 6, H]
         let (tembT, projT) = timeEmbed(timestep)
-        let (tembR, projR) = timeEmbedR(timestep - timestepR)
-        let temb           = tembT + tembR
-        let timestepProj   = projT + projR
+        let temb: MLXArray
+        let timestepProj: MLXArray
+        if let timeEmbedR {
+            // Turbo: residual CFG-distillation embedder
+            let (tembR, projR) = timeEmbedR(timestep - timestepR)
+            temb         = tembT + tembR
+            timestepProj = projT + projR
+        } else {
+            // SFT / base: no CFG distillation; CFG is applied outside by the sampler
+            temb         = tembT
+            timestepProj = projT
+        }
 
         for (idx, layer) in layers.enumerated() {
             let selfMask: MLXArray? = config.attentionType(for: idx) == "sliding_attention"
@@ -614,20 +687,25 @@ final class ACEStepDiT: Module, @unchecked Sendable {
     let lyricEncoder: AceLyricEncoder
     let timbreEncoder: AceStepTimbreEncoder
     let detokenizer: AceAudioDetokenizer
+    /// Audio tokenizer (input projection + attention pooler + ResidualFSQ).
+    /// Used by cover/text2musicLM modes to convert 25 Hz acoustic latents into
+    /// 5 Hz quantized tokens (and back through `detokenizer`).
+    let audioTokenizer: AceStepAudioTokenizer
     /// Projects external text-encoder hidden states (1024) → DiT hidden size (2048).
     /// Loaded from checkpoint key `encoder.text_projector.weight` (no bias).
     let textProjector: Linear
     var nullConditionEmb: MLXArray   // [1, 1, hiddenSize]
     let config: AceStepConfig
 
-    init(config: AceStepConfig = AceStepConfig()) {
+    init(config: AceStepConfig = .turbo) {
         self.config    = config
         decoder        = AceStepDiTModel(config: config)
         lyricEncoder   = AceLyricEncoder(config: config)
         timbreEncoder  = AceStepTimbreEncoder(config: config)
         detokenizer    = AceAudioDetokenizer(config: config)
-        textProjector  = Linear(config.textHiddenDim, config.hiddenSize, bias: false)
-        nullConditionEmb = MLXArray.zeros([1, 1, config.hiddenSize])
+        audioTokenizer = AceStepAudioTokenizer(config: config)
+        textProjector  = Linear(config.textHiddenDim, config.encoderHiddenSize, bias: false)
+        nullConditionEmb = MLXArray.zeros([1, 1, config.encoderHiddenSize])
         super.init()
     }
 }

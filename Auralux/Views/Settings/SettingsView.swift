@@ -62,6 +62,75 @@ struct SettingsView: View {
                 }
             }
 
+            settingsCard("Generation", systemImage: "waveform") {
+                VStack(spacing: 10) {
+                    LabeledContent("DiT variant") {
+                        Picker("", selection: Bindable(viewModel).ditVariant) {
+                            ForEach(DiTVariant.allCases.filter(\.isAvailable)) { variant in
+                                Text(variant.displayName)
+                                    .tag(variant)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 220)
+                        .onChange(of: viewModel.ditVariant) { _, _ in
+                            Task { await engine.loadModels() }
+                        }
+                    }
+                    Divider()
+                    LabeledContent("Default mode") {
+                        Picker("", selection: Bindable(viewModel).defaultMode) {
+                            ForEach(GenerationMode.allCases.filter(\.isImplemented)) { mode in
+                                Text(mode.displayName)
+                                    .tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 220)
+                    }
+                    Divider()
+                    LabeledContent("Default steps") {
+                        Stepper(
+                            "\(viewModel.defaultNumSteps)",
+                            value: Bindable(viewModel).defaultNumSteps,
+                            in: 1...viewModel.ditVariant.maxNumSteps
+                        )
+                        .fixedSize()
+                    }
+                    Divider()
+                    LabeledContent("Default shift") {
+                        Picker("", selection: Bindable(viewModel).defaultScheduleShift) {
+                            Text("1.0").tag(1.0)
+                            Text("2.0").tag(2.0)
+                            Text("3.0").tag(3.0)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 160)
+                    }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent("Default CFG scale") {
+                            Slider(
+                                value: Bindable(viewModel).defaultCfgScale,
+                                in: 1.0...20.0
+                            )
+                            .frame(width: 160)
+                            .disabled(!viewModel.ditVariant.respectsCFG)
+                            Text(String(format: "%.1f", viewModel.defaultCfgScale))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 32, alignment: .trailing)
+                        }
+                        if !viewModel.ditVariant.respectsCFG {
+                            Text("Turbo ignores CFG. Switch DiT variant to enable.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
             settingsCard("Export", systemImage: "square.and.arrow.up") {
                 LabeledContent("Default format") {
                     Picker("", selection: Bindable(viewModel).defaultExportFormat) {

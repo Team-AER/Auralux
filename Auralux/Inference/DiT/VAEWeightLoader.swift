@@ -2,10 +2,10 @@ import MLX
 import MLXNN
 import Foundation
 
-/// Loads converted VAE decoder weights from `<baseDir>/vae/vae_weights.safetensors`.
+/// Loads converted VAE encoder + decoder weights from `<baseDir>/vae/vae_weights.safetensors`.
 enum VAEWeightLoader {
 
-    static func load(baseDir: URL, into model: DCHiFiGANDecoder) throws {
+    static func load(baseDir: URL, into model: DCHiFiGANVAE) throws {
         let url = baseDir
             .appendingPathComponent("vae")
             .appendingPathComponent("vae_weights.safetensors")

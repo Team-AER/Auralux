@@ -65,7 +65,7 @@ final class NativeInferenceEngine {
 
     private var dit: ACEStepDiT?
     private var lm: ACEStepLMModel?
-    private var vae: DCHiFiGANDecoder?
+    private var vae: DCHiFiGANVAE?
     private var silenceLatent: MLXArray?
     private var tokenizer: BPETokenizer?
     private var textEncoder: Qwen3EncoderModel?
@@ -76,11 +76,17 @@ final class NativeInferenceEngine {
 
     // MARK: - Paths
 
-    var mlxModelDirectory: URL {
-        FileUtilities.modelDirectory.appendingPathComponent("ace-step-v1.5-mlx", isDirectory: true)
+    private var currentVariant: DiTVariant {
+        let raw = UserDefaults.standard.string(forKey: SettingsViewModel.Keys.ditVariant) ?? "turbo"
+        return DiTVariant(rawValue: raw) ?? .turbo
+    }
+
+    func mlxModelDirectory(for variant: DiTVariant) -> URL {
+        FileUtilities.modelDirectory.appendingPathComponent(variant.mlxDirectoryName, isDirectory: true)
     }
 
     var weightsExist: Bool {
+        let dir = mlxModelDirectory(for: currentVariant)
         let required = [
             "dit/dit_weights.safetensors",
             "dit/silence_latent.safetensors",
@@ -91,9 +97,7 @@ final class NativeInferenceEngine {
             "text/text_merges.txt",
         ]
         return required.allSatisfy { path in
-            FileManager.default.fileExists(
-                atPath: mlxModelDirectory.appendingPathComponent(path).path
-            )
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent(path).path)
         }
     }
 
@@ -129,7 +133,7 @@ final class NativeInferenceEngine {
         modelState = .downloading(progress: 0)
         log.info("Downloading model weights from HuggingFace", category: .inference)
 
-        try await ModelDownloader.shared.downloadAll(to: mlxModelDirectory) { [weak self] progress in
+        try await ModelDownloader.shared.downloadAll(to: mlxModelDirectory(for: currentVariant)) { [weak self] progress in
             Task { @MainActor [weak self] in
                 self?.modelState = .downloading(progress: progress)
             }
@@ -144,16 +148,17 @@ final class NativeInferenceEngine {
     func loadModels() async {
         guard !isGenerating else { return }
         modelState = .loading
-        log.info("Loading MLX models from \(mlxModelDirectory.path)", category: .inference)
 
-        let baseDir = mlxModelDirectory
-        // Read at the call site so the detached task captures a sendable Bool, not the
-        // @MainActor-bound view model. UserDefaults is process-wide and safe to read here.
-        let loadLM = UserDefaults.standard.bool(forKey: SettingsViewModel.Keys.useLM)
+        // Read both settings at the call site: UserDefaults is thread-safe and
+        // avoids capturing the @MainActor-bound SettingsViewModel in the detached task.
+        let variant = currentVariant
+        let baseDir = mlxModelDirectory(for: variant)
+        let loadLM  = UserDefaults.standard.bool(forKey: SettingsViewModel.Keys.useLM)
+        log.info("Loading MLX models (\(variant.rawValue)) from \(baseDir.path)", category: .inference)
 
         do {
             let models = try await Task<LoadedModels, Error>.detached(priority: .userInitiated) {
-                let dit = ACEStepDiT()
+                let dit = ACEStepDiT(config: variant.modelConfig)
                 try DiTWeightLoader.load(baseDir: baseDir, into: dit)
                 let silenceLatent = try SilenceLatentLoader.load(baseDir: baseDir)
                 // Skip LM allocation and weight load entirely when the toggle is off —
@@ -164,7 +169,7 @@ final class NativeInferenceEngine {
                     try LMWeightLoader.load(baseDir: baseDir, into: model)
                     lm = model
                 }
-                let vae = DCHiFiGANDecoder()
+                let vae = DCHiFiGANVAE()
                 try VAEWeightLoader.load(baseDir: baseDir, into: vae)
                 let tokenizer = loadLM
                     ? (try? BPETokenizer(
@@ -214,6 +219,17 @@ final class NativeInferenceEngine {
             return stream
         }
 
+        // text2musicLM also needs the LM. Surface a clean error rather than
+        // letting the detached task panic on a nil unwrap below.
+        if request.mode == .text2musicLM, lm == nil {
+            continuation.finish(
+                throwing: NativeEngineError.generationFailed(
+                    "text2musicLM mode requires the 5 Hz LM. Toggle 'Load 5 Hz LM' in Settings."
+                )
+            )
+            return stream
+        }
+
         generationTask?.cancel()
         activeContinuation?.finish(throwing: CancellationError())
         activeContinuation = continuation
@@ -222,36 +238,48 @@ final class NativeInferenceEngine {
         let localCont      = continuation
         let localDit       = dit
         let localVae       = vae
+        let localLm        = lm
         let localSilence   = SendableMLXArray(value: silenceLatent)
         let localTextEncoder   = textEncoder
         let localTextTokenizer = textTokenizer
         let generatedDir = FileUtilities.generatedAudioDirectory
-        let duration     = request.duration
 
         generationTask = Task.detached(priority: .userInitiated) {
             do {
                 try Task.checkCancellation()
-                localCont.yield(.preparing(message: "Building latent noise..."))
+                localCont.yield(.preparing(message: "Preparing inputs..."))
 
-                // 25 Hz latent frame rate, 64-dim acoustic latent
-                let T = max(1, Int(duration * 25.0))
                 let acousticDim = localDit.config.audioAcousticHiddenDim
                 let contextDim  = localDit.config.inChannels - acousticDim
-
                 guard contextDim == acousticDim * 2 else {
                     throw NativeEngineError.generationFailed("Expected context dimension \(acousticDim * 2), got \(contextDim)")
                 }
 
+                // ── Per-mode acoustic latent setup ────────────────────────────────
+                // Resolves T (latent length), src_latents, clean_src_latents (repaint),
+                // and lm_hints_25Hz (cover/text2musicLM). All shapes are [1, T, 64].
+                let inputs = try NativeInferenceEngine.prepareModeInputs(
+                    request:       request,
+                    dit:           localDit,
+                    vae:           localVae,
+                    lm:            localLm,
+                    silenceLatent: localSilence.value,
+                    progress: { msg in localCont.yield(.preparing(message: msg)) }
+                )
+                // Drop VAE-encoder / audio-tokenizer intermediates before we
+                // start stacking the encoder + sampler activations.
+                MLX.Memory.clearCache()
+                let T = inputs.frames
+                let srcLatentsForContext = inputs.srcLatents
+                let cleanSrcLatents = inputs.cleanSrcLatents
+                let repaintMask = inputs.repaintMask
+                let timbreLatent = inputs.timbreLatent
+
                 let noise      = MLXRandom.normal([1, T, acousticDim])
-                let srcLatents = try SilenceLatentLoader.slice(localSilence.value, frames: T)
                 let chunkMasks = MLXArray.ones([1, T, acousticDim])
-                let contextLatents = concatenated([srcLatents, chunkMasks], axis: -1)
+                let contextLatents = concatenated([srcLatentsForContext, chunkMasks], axis: -1)
 
                 // ── Build cross-attention conditioning ─────────────────────────────
-                // Mirrors `AceStepConditionEncoder.forward` from upstream:
-                //   text:   tokens  → Qwen3 full forward → text_projector(1024→2048)
-                //   lyrics: tokens  → Qwen3 embed_tokens lookup only → lyric_encoder
-                //   pack(lyric_encoded, text_projected) along the sequence dim.
                 localCont.yield(.preparing(message: "Encoding conditioning..."))
 
                 let (encH, encMask) = NativeInferenceEngine.buildEncoderHiddenStates(
@@ -259,7 +287,7 @@ final class NativeInferenceEngine {
                     dit:            localDit,
                     textEncoder:    localTextEncoder,
                     textTokenizer:  localTextTokenizer,
-                    silenceLatent:  localSilence.value
+                    timbreLatent:   timbreLatent
                 )
                 eval(encH, encMask)
                 // Encoder transients (Qwen3 hidden states, lyric/timbre intermediates)
@@ -269,15 +297,56 @@ final class NativeInferenceEngine {
 
                 try Task.checkCancellation()
 
-                let sampler = TurboSampler()
-                let result  = sampler.sample(
-                    noise:                noise,
-                    contextLatents:       contextLatents,
-                    encoderHiddenStates:  encH,
-                    encoderAttentionMask: encMask,
-                    model:                localDit.decoder
-                ) { step, total in
-                    localCont.yield(.step(current: step + 1, total: total))
+                // Build sampler — choice depends on whether the loaded DiT uses
+                // CFG distillation (turbo) or expects two-pass CFG (SFT/base).
+                let result: MLXArray
+                do {
+                    if localDit.config.usesCFGDistillation {
+                        // Turbo: single forward pass, CFG baked into weights.
+                        let sampler = try TurboSampler(
+                            numSteps: request.numSteps,
+                            shift:    request.scheduleShift
+                        )
+                        result = sampler.sample(
+                            noise:                noise,
+                            contextLatents:       contextLatents,
+                            encoderHiddenStates:  encH,
+                            encoderAttentionMask: encMask,
+                            model:                localDit.decoder,
+                            repaint:              cleanSrcLatents.flatMap { src in
+                                repaintMask.map { mask in
+                                    TurboSampler.RepaintInputs(
+                                        cleanSrcLatents:    src,
+                                        mask:               mask,
+                                        injectionRatio:     request.repaintInjectionRatio,
+                                        crossfadeFrames:    request.repaintCrossfadeFrames,
+                                        noise:              noise
+                                    )
+                                }
+                            }
+                        ) { step, total in
+                            localCont.yield(.step(current: step + 1, total: total))
+                        }
+                    } else {
+                        // SFT / base: two forward passes per step (cond + uncond), CFG blend.
+                        let sampler = try CFGSampler(
+                            numSteps: request.numSteps,
+                            shift:    request.scheduleShift,
+                            cfgScale: Float(request.cfgScale)
+                        )
+                        result = sampler.sample(
+                            noise:                noise,
+                            contextLatents:       contextLatents,
+                            encoderHiddenStates:  encH,
+                            encoderAttentionMask: encMask,
+                            nullConditionEmb:     localDit.nullConditionEmb,
+                            model:                localDit.decoder
+                        ) { step, total in
+                            localCont.yield(.step(current: step + 1, total: total))
+                        }
+                    }
+                } catch {
+                    throw NativeEngineError.generationFailed(String(describing: error))
                 }
 
                 try Task.checkCancellation()
@@ -321,6 +390,223 @@ final class NativeInferenceEngine {
         isGenerating = false
     }
 
+    // MARK: - Mode-specific input preparation
+
+    /// Result of `prepareModeInputs`. Resolves T (latent length) and the four
+    /// 25 Hz acoustic latents that mode-aware generation needs, plus the
+    /// repaint mask for sampler-time injection.
+    private struct ModeInputs {
+        let frames: Int
+        let srcLatents: MLXArray             // [1, T, 64] — feeds into `concat(_, chunk_masks)`
+        let cleanSrcLatents: MLXArray?       // [1, T, 64] — only set for repaint
+        let repaintMask: MLXArray?           // [1, T] bool — only set for repaint
+        let timbreLatent: MLXArray           // [1, 750, 64] — fed into `dit.timbreEncoder`
+    }
+
+
+    /// Resolve `srcLatents`, `cleanSrcLatents`, `repaintMask`, and `timbreLatent`
+    /// per the requested mode. Mirrors the relevant branches in upstream
+    /// `AceStepConditionGenerationModel.generate_audio` /
+    /// `AceStepConditionGenerationModel.prepare_condition` —
+    /// `modeling_acestep_v15_turbo.py:1654-1699` for the cover/audio_codes path
+    /// and `:2178-2187` for the repaint mask path.
+    private nonisolated static func prepareModeInputs(
+        request: GenerationParameters,
+        dit: ACEStepDiT,
+        vae: DCHiFiGANVAE,
+        lm: ACEStepLMModel?,
+        silenceLatent: MLXArray,
+        progress: (String) -> Void
+    ) throws -> ModeInputs {
+        let mode = request.mode
+
+        // Default timbre = silence-latent slice (used by text2music + LM modes).
+        func defaultTimbre() throws -> MLXArray {
+            (try? SilenceLatentLoader.slice(silenceLatent, frames: kTimbreFrames))
+                ?? silenceLatent[0..., ..<min(kTimbreFrames, silenceLatent.shape[1]), 0...]
+        }
+
+        // Helper: Encode a user-provided audio file → 25 Hz, 64-dim latent.
+        // Returns `[1, T, 64]`.
+        func encodeUserAudio(_ url: URL) throws -> MLXArray {
+            let audio = try AudioFileLoader.load(url: url)            // [1, T_audio, 2]
+            let latent = vae.encode(audio: audio)                      // [1, T_audio/1920, 64]
+            eval(latent)
+            return latent
+        }
+
+        switch mode {
+
+        // ── text2music: silence-latent for context AND timbre ─────────────────
+        case .text2music:
+            let T = max(1, Int(request.duration * kFrameRateHz))
+            let src = try SilenceLatentLoader.slice(silenceLatent, frames: T)
+            return ModeInputs(
+                frames:           T,
+                srcLatents:       src,
+                cleanSrcLatents:  nil,
+                repaintMask:      nil,
+                timbreLatent:     try defaultTimbre()
+            )
+
+        // ── extract: refer-audio timbre, silence-latent context ───────────────
+        case .extract:
+            guard let referURL = request.referAudioURL else {
+                throw NativeEngineError.generationFailed("Extract mode requires a reference audio file.")
+            }
+            progress("Encoding reference audio...")
+            let referLatent = try encodeUserAudio(referURL)
+            let T = max(1, Int(request.duration * kFrameRateHz))
+            let src = try SilenceLatentLoader.slice(silenceLatent, frames: T)
+            // Tile or trim to the canonical 750 timbre frames.
+            let timbre = try sliceOrTile(referLatent, frames: kTimbreFrames, fallback: silenceLatent)
+            return ModeInputs(
+                frames:           T,
+                srcLatents:       src,
+                cleanSrcLatents:  nil,
+                repaintMask:      nil,
+                timbreLatent:     timbre
+            )
+
+        // ── cover: source-audio context (passed through audio tokenizer for
+        // 5 Hz semantic distillation), refer-audio timbre if provided.
+        case .cover:
+            guard let sourceURL = request.sourceAudioURL else {
+                throw NativeEngineError.generationFailed("Cover mode requires a source audio file.")
+            }
+            progress("Encoding source audio...")
+            let sourceLatent = try encodeUserAudio(sourceURL)          // [1, T, 64]
+            // Round T down to a pool_window_size multiple (5 frames @ 25 Hz = 200 ms).
+            // This matches upstream's pad-then-tokenize loop in `tokenize(...)`.
+            let pool = dit.config.poolWindowSize
+            let T0 = sourceLatent.shape[1]
+            let T  = (T0 / pool) * pool
+            guard T > 0 else {
+                throw NativeEngineError.generationFailed("Source audio too short for cover (need ≥ \(pool) latent frames).")
+            }
+            let trimmed = sourceLatent[0..., ..<T, 0...]
+            // Tokenize → detokenize to produce the LM-hint stand-in for `src_latents`.
+            progress("Distilling source audio...")
+            let (quantized, _) = dit.audioTokenizer(trimmed)            // [1, T/5, hidden]
+            let lmHints25 = dit.detokenizer(quantized)                  // [1, T, 64]
+            eval(lmHints25)
+
+            // Timbre: use refer audio if provided, else silence.
+            let timbre: MLXArray
+            if let referURL = request.referAudioURL {
+                progress("Encoding reference audio...")
+                let referLatent = try encodeUserAudio(referURL)
+                timbre = try sliceOrTile(referLatent, frames: kTimbreFrames, fallback: silenceLatent)
+            } else {
+                timbre = try defaultTimbre()
+            }
+            return ModeInputs(
+                frames:           T,
+                srcLatents:       lmHints25,
+                cleanSrcLatents:  nil,
+                repaintMask:      nil,
+                timbreLatent:     timbre
+            )
+
+        // ── repaint: source-audio context as `clean_src_latents`; mask drives
+        // sampler injection; non-mask regions kept from source.
+        case .repaint:
+            guard let sourceURL = request.sourceAudioURL else {
+                throw NativeEngineError.generationFailed("Repaint mode requires a source audio file.")
+            }
+            progress("Encoding source audio...")
+            let sourceLatent = try encodeUserAudio(sourceURL)          // [1, T, 64]
+            let T = sourceLatent.shape[1]
+            guard T > 0 else {
+                throw NativeEngineError.generationFailed("Source audio decoded to zero latent frames.")
+            }
+            let mask = repaintMaskTensor(ranges: request.repaintMaskRanges, frames: T)
+            // For the context concat, keep the *source* latents — they get
+            // selectively replaced inside the sampler at non-repaint frames.
+            return ModeInputs(
+                frames:           T,
+                srcLatents:       sourceLatent,
+                cleanSrcLatents:  sourceLatent,
+                repaintMask:      mask,
+                timbreLatent:     try defaultTimbre()
+            )
+
+        // ── text2musicLM: LM autoregressively generates audio_codes → 5 Hz hints
+        case .text2musicLM:
+            guard let lm else {
+                throw NativeEngineError.generationFailed("text2musicLM mode requires the 5 Hz LM toggle to be on.")
+            }
+            let T = max(1, Int(request.duration * kFrameRateHz))
+            // Pool window must divide T (audio codes are at 5 Hz).
+            let pool = dit.config.poolWindowSize
+            let aligned = (T / pool) * pool
+            guard aligned > 0 else {
+                throw NativeEngineError.generationFailed("Duration too short for LM mode (need ≥ \(Double(pool) / kFrameRateHz)s).")
+            }
+            progress("Generating audio codes (LM)...")
+            let codeFrames = aligned / pool
+            // Conditioning prompt for the LM: re-use the same caption text as the DiT.
+            let promptText = formatTextPrompt(
+                prompt: request.prompt, tags: request.tags, duration: request.duration
+            )
+            let codes = try ACEStepLMSampler.generate(
+                lm:            lm,
+                prompt:        promptText,
+                lyrics:        request.lyrics,
+                language:      request.language,
+                codeFrames:    codeFrames,
+                seed:          request.seed
+            )
+            // codes: [1, codeFrames, num_quantizers] — turn back into 25 Hz hints.
+            let pooled = dit.audioTokenizer.quantizer.getOutputFromIndices(codes)  // [1, T_5, hidden]
+            let hints25 = dit.detokenizer(pooled)                                  // [1, T, 64]
+            eval(hints25)
+            return ModeInputs(
+                frames:           aligned,
+                srcLatents:       hints25,
+                cleanSrcLatents:  nil,
+                repaintMask:      nil,
+                timbreLatent:     try defaultTimbre()
+            )
+        }
+    }
+
+    /// Tile a short latent or trim a long one to exactly `frames` frames along
+    /// the time axis. Falls back to `fallback`'s leading slice when the encoder
+    /// produced an empty array (shouldn't happen, but safer than crashing).
+    private nonisolated static func sliceOrTile(
+        _ latent: MLXArray, frames: Int, fallback: MLXArray
+    ) throws -> MLXArray {
+        let T = latent.shape[1]
+        guard T > 0 else {
+            return try SilenceLatentLoader.slice(fallback, frames: frames)
+        }
+        if T >= frames {
+            return latent[0..., ..<frames, 0...]
+        }
+        let repeats = (frames + T - 1) / T
+        let tiled = concatenated(Array(repeating: latent, count: repeats), axis: 1)
+        return tiled[0..., ..<frames, 0...]
+    }
+
+    /// Build a `[1, T]` boolean mask (as int32 0/1) from a list of repaint
+    /// ranges. Ranges are clamped to `[0, T)` and overlapping ranges are
+    /// unioned. An empty list returns an all-zero mask (= regenerate nothing,
+    /// effectively a no-op repaint). An out-of-bounds-only list also yields
+    /// all-zero — the caller should warn but the engine doesn't fail.
+    private nonisolated static func repaintMaskTensor(
+        ranges: [RepaintRange], frames: Int
+    ) -> MLXArray {
+        var bits = [Int32](repeating: 0, count: frames)
+        for r in ranges {
+            let s = max(0, Int((r.start * kFrameRateHz).rounded(.down)))
+            let e = min(frames, Int((r.end * kFrameRateHz).rounded(.up)))
+            guard e > s else { continue }
+            for i in s..<e { bits[i] = 1 }
+        }
+        return MLXArray(bits, [1, frames])
+    }
+
     // MARK: - Conditioning helpers
 
     /// Builds the cross-attention condition tensor from a generation request.
@@ -341,7 +627,7 @@ final class NativeInferenceEngine {
         dit: ACEStepDiT,
         textEncoder: Qwen3EncoderModel,
         textTokenizer: Qwen3Tokenizer,
-        silenceLatent: MLXArray
+        timbreLatent: MLXArray
     ) -> (hidden: MLXArray, mask: MLXArray) {
         // ── Text branch (caption + tags) ─────────────────────────────────────
         let textPrompt = formatTextPrompt(
@@ -374,14 +660,12 @@ final class NativeInferenceEngine {
 
         // ── Timbre branch ────────────────────────────────────────────────────
         // Upstream `conditioning_batch.py:66-67` injects 30s of silence audio when
-        // no reference audio is supplied; `conditioning_embed.py:46-49` then
-        // substitutes the precomputed `silence_latent[:, :750, :]` slice. We mirror
-        // that for text2music — no reference audio path, just silence-latent timbre.
-        let timbreFrames = 750
-        let timbreInput = (try? SilenceLatentLoader.slice(silenceLatent, frames: timbreFrames))
-            ?? silenceLatent[0..., ..<min(timbreFrames, silenceLatent.shape[1]), 0...]
-        let timbrePooled = dit.timbreEncoder(timbreInput)              // [1, hiddenSize]
-        let timbreHidden = timbrePooled.reshaped([1, 1, dit.config.hiddenSize])
+        // no reference audio is supplied; `conditioning_embed.py:46-49` substitutes
+        // `silence_latent[:, :750, :]`. For Extract / Cover we instead pass in the
+        // VAE-encoded reference audio's first 750 frames (i.e. `timbreLatent` from
+        // `prepareModeInputs`).
+        let timbrePooled = dit.timbreEncoder(timbreLatent)             // [1, encoderHiddenSize]
+        let timbreHidden = timbrePooled.reshaped([1, 1, dit.config.encoderHiddenSize])
         let timbreMask   = MLXArray.ones([1, 1]).asType(.int32)
 
         // ── Pack — exactly the upstream order in AceStepConditionEncoder.forward
@@ -508,10 +792,16 @@ final class NativeInferenceEngine {
 
 // MARK: - Private Helpers
 
+// Latent frame rate (25 Hz, hardcoded by the v1.5 turbo VAE) and the
+// canonical timbre slice length used by `AceStepTimbreEncoder`. Both are
+// nonisolated so the detached generation task can read them safely.
+private let kFrameRateHz: Double = 25
+private let kTimbreFrames: Int = 750
+
 private struct LoadedModels: @unchecked Sendable {
     let dit: ACEStepDiT
     let lm: ACEStepLMModel?
-    let vae: DCHiFiGANDecoder
+    let vae: DCHiFiGANVAE
     let silenceLatent: MLXArray
     let tokenizer: BPETokenizer?
     let textEncoder: Qwen3EncoderModel
