@@ -12,7 +12,11 @@ enum LMWeightLoader {
     static func load(from url: URL, into model: ACEStepLMModel) throws {
         let flat    = try loadArrays(url: url)
         let nested  = ModuleParameters.unflattened(flat)
+        #if DEBUG
+        try model.update(parameters: nested, verify: .shapeMismatch)
+        #else
         try model.update(parameters: nested, verify: .none)
+        #endif
         eval(model.parameters())
     }
 

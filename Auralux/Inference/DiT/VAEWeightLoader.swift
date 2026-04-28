@@ -3,9 +3,6 @@ import MLXNN
 import Foundation
 
 /// Loads converted VAE decoder weights from `<baseDir>/vae/vae_weights.safetensors`.
-///
-/// Silently no-ops when the file is absent so the app degrades gracefully
-/// (DCHiFiGANDecoder returns silence) until weights are downloaded.
 enum VAEWeightLoader {
 
     static func load(baseDir: URL, into model: DCHiFiGANDecoder) throws {
@@ -13,11 +10,17 @@ enum VAEWeightLoader {
             .appendingPathComponent("vae")
             .appendingPathComponent("vae_weights.safetensors")
 
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw NativeEngineError.weightsNotFound(url)
+        }
 
         let flat   = try loadArrays(url: url)
         let nested = ModuleParameters.unflattened(flat)
+        #if DEBUG
+        try model.update(parameters: nested, verify: .shapeMismatch)
+        #else
         try model.update(parameters: nested, verify: .none)
+        #endif
         eval(model.parameters())
     }
 }

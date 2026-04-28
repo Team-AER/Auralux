@@ -10,10 +10,9 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var didBootstrap = false
 
-    @State private var playerPanelWidth: CGFloat = 320
-    @State private var dragStartWidth: CGFloat = 320
-    private let minPlayerWidth: CGFloat = 240
-    private let maxPlayerWidth: CGFloat = 640
+    @State private var playerPanelWidth: CGFloat? = nil
+    @State private var dragStartWidth: CGFloat = 0
+    private let minPanelWidth: CGFloat = 280
 
     var body: some View {
         ZStack {
@@ -50,9 +49,17 @@ struct ContentView: View {
         }
     }
 
-    private var resizeDivider: some View {
+    private func resolvedPlayerWidth(totalWidth: CGFloat) -> CGFloat {
+        let target = playerPanelWidth ?? (totalWidth / 2)
+        let maxWidth = max(minPanelWidth, totalWidth - minPanelWidth)
+        return max(minPanelWidth, min(maxWidth, target))
+    }
+
+    private func resizeDivider(totalWidth: CGFloat) -> some View {
         ZStack {
-            Divider()
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(width: 1)
             Color.clear
                 .frame(width: 8)
                 .contentShape(Rectangle())
@@ -63,9 +70,10 @@ struct ContentView: View {
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             let proposed = dragStartWidth - value.translation.width
-                            playerPanelWidth = max(minPlayerWidth, min(maxPlayerWidth, proposed))
+                            let maxWidth = max(minPanelWidth, totalWidth - minPanelWidth)
+                            playerPanelWidth = max(minPanelWidth, min(maxWidth, proposed))
                         }
-                        .onEnded { _ in dragStartWidth = playerPanelWidth }
+                        .onEnded { _ in dragStartWidth = playerPanelWidth ?? 0 }
                 )
         }
         .frame(width: 8)
@@ -75,26 +83,35 @@ struct ContentView: View {
         NavigationSplitView {
             SidebarView()
         } detail: {
-            HStack(spacing: 0) {
-                Group {
-                    switch sidebarViewModel.selectedSection ?? .generate {
-                    case .generate:
-                        GenerationView()
-                    case .history:
-                        HistoryBrowserView()
-                    case .audioToAudio:
-                        AudioImportView()
-                    case .settings:
-                        SettingsView()
+            GeometryReader { proxy in
+                HStack(spacing: 0) {
+                    Group {
+                        switch sidebarViewModel.selectedSection ?? .generate {
+                        case .generate:
+                            GenerationView()
+                        case .history:
+                            HistoryBrowserView()
+                        case .audioToAudio:
+                            AudioImportView()
+                        case .settings:
+                            SettingsView()
+                        }
+                    }
+                    .navigationTitle(sidebarViewModel.selectedSection?.title ?? "Auralux")
+                    .frame(maxWidth: .infinity)
+
+                    if sidebarViewModel.selectedSection != .settings {
+                        resizeDivider(totalWidth: proxy.size.width)
+                        playerPanel
+                            .frame(width: resolvedPlayerWidth(totalWidth: proxy.size.width))
                     }
                 }
-                .navigationTitle(sidebarViewModel.selectedSection?.title ?? "Auralux")
-                .frame(maxWidth: .infinity)
-
-                if sidebarViewModel.selectedSection != .settings {
-                    resizeDivider
-                    playerPanel
-                        .frame(width: playerPanelWidth)
+                .onAppear {
+                    if playerPanelWidth == nil {
+                        let half = proxy.size.width / 2
+                        playerPanelWidth = half
+                        dragStartWidth = half
+                    }
                 }
             }
         }

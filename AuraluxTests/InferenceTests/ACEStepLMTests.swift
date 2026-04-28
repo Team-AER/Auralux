@@ -30,7 +30,7 @@ final class ACEStepLMTests: XCTestCase {
         XCTAssertEqual(cfg.numAttentionHeads, 16)
         XCTAssertEqual(cfg.numKeyValueHeads, 8)
         XCTAssertEqual(cfg.numHiddenLayers, 28)
-        XCTAssertEqual(cfg.vocabSize, 4096)
+        XCTAssertEqual(cfg.vocabSize, 217204)
     }
 
     // MARK: - Attention

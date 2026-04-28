@@ -5,13 +5,13 @@ import Foundation
 // MARK: - Protocol
 
 protocol AudioVAEDecoder: AnyObject {
-    /// Decode DiT acoustic latents to a mono waveform.
+    /// Decode DiT acoustic latents to a stereo waveform.
     /// - latent: [B, T, 64] from TurboSampler at 25 Hz
-    /// - Returns: [B, T × 1920] float32 PCM at 48 kHz, mono
+    /// - Returns: [B, T × 1920, 2] float32 PCM at 48 kHz
     func decode(latent: MLXArray) -> MLXArray
 }
 
-// MARK: - Snake1d  (x + sin²(α·x) / β)
+// MARK: - Snake1d  (x + sin²(exp(α)·x) / exp(β))
 // Learned per-channel activation used throughout the Oobleck decoder.
 
 final class Snake1d: Module, @unchecked Sendable {
@@ -19,17 +19,17 @@ final class Snake1d: Module, @unchecked Sendable {
     var beta: MLXArray    // [C]
 
     init(channels: Int) {
-        alpha = MLXArray.ones([channels])
-        beta  = MLXArray.ones([channels])
+        alpha = MLXArray.zeros([channels])
+        beta  = MLXArray.zeros([channels])
         super.init()
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         // x: [B, L, C] — broadcast alpha/beta over batch and length
-        let a = alpha.reshaped([1, 1, -1])
-        let b = beta.reshaped([1, 1, -1])
+        let a = exp(alpha).reshaped([1, 1, -1])
+        let b = exp(beta).reshaped([1, 1, -1])
         let s = sin(a * x)
-        return x + (s * s) / b
+        return x + (s * s) / (b + 1e-9)
     }
 }
 
@@ -58,7 +58,7 @@ final class OobleckResUnit: Module, @unchecked Sendable {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         var h = conv1(snake1(x))
         h = conv2(snake2(h))
-        return (x + h) / sqrt(2.0)
+        return x + h
     }
 }
 
@@ -95,7 +95,7 @@ final class OobleckDecoderBlock: Module, @unchecked Sendable {
     }
 }
 
-// MARK: - DCHiFiGANDecoder  (Oobleck VAE decoder: latent → 48 kHz mono audio)
+// MARK: - DCHiFiGANDecoder  (Oobleck VAE decoder: latent → 48 kHz stereo audio)
 //
 // Architecture (AutoencoderOobleck from stable_audio_tools):
 //   conv1(64→2048, k=7)
@@ -104,7 +104,7 @@ final class OobleckDecoderBlock: Module, @unchecked Sendable {
 //   block[2]: 512→256,   stride=4    (×4)
 //   block[3]: 256→128,   stride=4    (×4)
 //   block[4]: 128→128,   stride=2    (×2)
-//   snake1(128) → conv2(128→2, k=7, no bias) → mean over stereo → mono
+//   snake1(128) → conv2(128→2, k=7, no bias)
 //
 // Total upsampling: 10×6×4×4×2 = 1920  →  25 Hz latents → 48 kHz audio
 
@@ -114,8 +114,6 @@ final class DCHiFiGANDecoder: Module, AudioVAEDecoder, @unchecked Sendable {
     let blocks: [OobleckDecoderBlock]
     let snake1: Snake1d
     let conv2:  Conv1d
-
-    private let scalingFactor: Float = 0.1825
 
     override init() {
         conv1  = Conv1d(inputChannels: 64,  outputChannels: 2048, kernelSize: 7, padding: 3)
@@ -138,12 +136,11 @@ final class DCHiFiGANDecoder: Module, AudioVAEDecoder, @unchecked Sendable {
     }
 
     /// - latent: [B, T, 64] acoustic latent at 25 Hz
-    /// - Returns: [B, T × 1920] mono PCM at 48 kHz
+    /// - Returns: [B, T × 1920, 2] stereo PCM at 48 kHz
     func decode(latent: MLXArray) -> MLXArray {
-        var x = latent.asType(.float32) / scalingFactor
+        var x = latent.asType(.float32)
         x = conv1(x)
         for block in blocks { x = block(x) }
-        x = tanh(conv2(snake1(x))) // [B, T×1920, 2]  stereo, bounded [-1,1]
-        return x.mean(axis: -1)   // [B, T×1920]      mono mix
+        return conv2(snake1(x)) // [B, T×1920, 2] stereo
     }
 }

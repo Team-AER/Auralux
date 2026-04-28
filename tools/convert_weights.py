@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -419,6 +420,40 @@ def convert_dit(src_safetensors: Path, output_dir: Path, dtype_str: str) -> bool
     return True
 
 
+def convert_silence_latent(src_pt: Path, output_dir: Path, dtype_str: str) -> bool:
+    """Convert upstream silence_latent.pt to MLX safetensors.
+
+    ACE-Step stores this PyTorch tensor as shape [1, 64, T].  The Swift engine
+    consumes [1, T, 64] so it can concatenate it with a [1, T, 64] chunk mask.
+    """
+    import numpy as np
+    from safetensors.numpy import save_file as save_np
+
+    np_dtype = np.float16 if dtype_str == "float16" else np.float32
+
+    print(f"  Converting {src_pt.name} …")
+    with zipfile.ZipFile(src_pt, "r") as zf:
+        data_member = next((name for name in zf.namelist() if name.endswith("/data/0")), None)
+        if data_member is None:
+            raise ValueError(f"{src_pt} does not look like a torch zip tensor archive")
+        raw = zf.read(data_member)
+
+    tensor = np.frombuffer(raw, dtype="<f4").copy()
+    if tensor.size % 64 != 0:
+        raise ValueError(f"silence_latent element count {tensor.size} is not divisible by 64")
+
+    frames = tensor.size // 64
+    tensor = tensor.reshape(1, 64, frames).transpose(0, 2, 1)
+    tensor = np.ascontiguousarray(tensor.astype(np_dtype))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "silence_latent.safetensors"
+    print(f"  Saving silence_latent {list(tensor.shape)} → {out_path} …")
+    save_np({"silence_latent": tensor}, str(out_path))
+    print("  ✓ Silence latent written")
+    return True
+
+
 def convert_lm(src_safetensors: Path, output_dir: Path, dtype_str: str) -> bool:
     import numpy as np
     from safetensors.numpy import save_file as save_np
@@ -566,13 +601,15 @@ def inspect_file(path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def validate_output(output_dir: Path) -> bool:
-    dit_path = output_dir / "dit" / "dit_weights.safetensors"
-    lm_path  = output_dir / "lm"  / "lm_weights.safetensors"
-    vae_path = output_dir / "vae" / "vae_weights.safetensors"
+    dit_path     = output_dir / "dit" / "dit_weights.safetensors"
+    silence_path = output_dir / "dit" / "silence_latent.safetensors"
+    lm_path      = output_dir / "lm"  / "lm_weights.safetensors"
+    vae_path     = output_dir / "vae" / "vae_weights.safetensors"
 
     ok = True
     for label, path, expected_min in [
         ("DiT", dit_path, 100),
+        ("Silence latent", silence_path, 1),
         ("LM",  lm_path,  50),
         ("VAE", vae_path, 50),
     ]:
@@ -609,6 +646,18 @@ def validate_output(output_dir: Path) -> bool:
             else:
                 print(f"  ✗ DiT key MISSING: {k}", file=sys.stderr)
                 ok = False
+
+    if silence_path.exists():
+        tensors = _load_safetensors_numpy(silence_path)
+        latent = tensors.get("silence_latent")
+        if latent is None:
+            print("  ✗ Silence latent key MISSING: silence_latent", file=sys.stderr)
+            ok = False
+        elif len(latent.shape) == 3 and latent.shape[0] == 1 and latent.shape[2] == 64:
+            print(f"  ✓ Silence latent shape OK: {list(latent.shape)}")
+        else:
+            print(f"  ✗ Silence latent shape invalid: {list(latent.shape)}", file=sys.stderr)
+            ok = False
 
     # Check for critical LM keys
     if lm_path.exists():
@@ -727,6 +776,12 @@ def main() -> int:
         if dit_src.exists():
             print(f"\n[DiT] Converting → {out_dir}/dit/ …")
             ok &= convert_dit(dit_src, out_dir / "dit", args.dtype)
+            silence_src = dit_cache / "acestep-v15-turbo" / "silence_latent.pt"
+            if silence_src.exists():
+                ok &= convert_silence_latent(silence_src, out_dir / "dit", args.dtype)
+            else:
+                print(f"ERROR: silence_latent.pt not found at {silence_src}", file=sys.stderr)
+                ok = False
         else:
             print(f"ERROR: DiT weights not found at {dit_src}", file=sys.stderr)
             ok = False

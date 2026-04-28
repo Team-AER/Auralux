@@ -16,6 +16,7 @@ actor ModelDownloader {
     // used for weighted overall-progress calculation.
     private static let manifest: [(path: String, bytes: Int64)] = [
         ("dit/dit_weights.safetensors",   3_900_000_000),
+        ("dit/silence_latent.safetensors",    1_920_000),
         ("lm/lm_weights.safetensors",     1_280_000_000),
         ("vae/vae_weights.safetensors",     169_000_000),
         ("lm/lm_tokenizer.json",             24_300_000),

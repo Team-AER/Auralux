@@ -225,13 +225,19 @@ final class ACEStepDiTTests: XCTestCase {
         XCTAssertEqual(stepCount, 2)
     }
 
-    // MARK: - AudioVAE stub
+    // MARK: - Audio VAE + Context
 
     func testAudioVAEDecoderShape() {
         let vae   = DCHiFiGANDecoder()
-        // Input [B, H, W, C] — stub uses W as time frames at 50 Hz / 48 kHz
-        let audio = vae.decode(latent: MLXArray.zeros([1, 8, 10, 8]))
+        let audio = vae.decode(latent: MLXArray.zeros([1, 1, 64]))
         eval(audio)
-        XCTAssertEqual(audio.shape, [1, 10 * 960])
+        XCTAssertEqual(audio.shape, [1, 1 * 1920, 2])
+    }
+
+    func testSilenceLatentSliceTilesToRequestedFrames() throws {
+        let latent = MLXArray.zeros([1, 3, 64])
+        let sliced = try SilenceLatentLoader.slice(latent, frames: 8)
+        eval(sliced)
+        XCTAssertEqual(sliced.shape, [1, 8, 64])
     }
 }

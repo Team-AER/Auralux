@@ -50,4 +50,6 @@ enum ModelManagerService {
             estimatedSizeGB: 1.2
         ),
     ]
+
+    static let knownArtifacts: [ModelArtifact] = [mlxArtifact] + upstreamVariants
 }

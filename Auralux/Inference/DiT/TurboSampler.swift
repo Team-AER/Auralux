@@ -35,7 +35,7 @@ struct TurboSampler {
     ///
     /// - Parameters:
     ///   - noise:                [B, T, audioAcousticHiddenDim] initial Gaussian noise
-    ///   - contextLatents:       [B, T, 128] context (src_latents + chunk_masks); zeros for text-to-music
+    ///   - contextLatents:       [B, T, 128] context (silence/src latents + chunk masks)
     ///   - encoderHiddenStates:  [B, S, hiddenSize] from lyric/condition encoder
     ///   - model:                The DiT decoder
     ///   - onStep:               Progress callback (step index, total steps)
