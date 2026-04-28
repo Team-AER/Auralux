@@ -196,8 +196,8 @@ final class ACEStepDiTTests: XCTestCase {
     func testTurboSamplerDefaultSchedule() {
         let sampler = TurboSampler()
         XCTAssertEqual(sampler.numSteps, 8)
-        XCTAssertEqual(sampler.schedule.first!, 1.0,  accuracy: 1e-6)
-        XCTAssertEqual(sampler.schedule.last!,  0.3,  accuracy: 1e-6)
+        XCTAssertEqual(sampler.schedule.first!, 1.0,    accuracy: 1e-6)
+        XCTAssertEqual(sampler.schedule.last!,  0.125,  accuracy: 1e-6)
         // Schedule must be strictly descending
         for i in 1..<sampler.schedule.count {
             XCTAssertLessThan(sampler.schedule[i], sampler.schedule[i - 1])

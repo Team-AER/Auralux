@@ -68,6 +68,8 @@ final class NativeInferenceEngine {
     private var vae: DCHiFiGANDecoder?
     private var silenceLatent: MLXArray?
     private var tokenizer: BPETokenizer?
+    private var textEncoder: Qwen3EncoderModel?
+    private var textTokenizer: Qwen3Tokenizer?
     private var generationTask: Task<Void, Never>?
     private var activeContinuation: AsyncThrowingStream<GenerationProgress, Error>.Continuation?
     private let log = AppLogger.shared
@@ -84,6 +86,9 @@ final class NativeInferenceEngine {
             "dit/silence_latent.safetensors",
             "lm/lm_weights.safetensors",
             "vae/vae_weights.safetensors",
+            "text/text_weights.safetensors",
+            "text/text_vocab.json",
+            "text/text_merges.txt",
         ]
         return required.allSatisfy { path in
             FileManager.default.fileExists(
@@ -111,6 +116,8 @@ final class NativeInferenceEngine {
         vae = nil
         silenceLatent = nil
         tokenizer = nil
+        textEncoder = nil
+        textTokenizer = nil
     }
 
     // MARK: - Model Download + Load
@@ -154,7 +161,13 @@ final class NativeInferenceEngine {
                     vocabURL: baseDir.appendingPathComponent("lm/lm_vocab.json"),
                     mergesURL: baseDir.appendingPathComponent("lm/lm_merges.txt")
                 )
-                return LoadedModels(dit: dit, lm: lm, vae: vae, silenceLatent: silenceLatent, tokenizer: tokenizer)
+                let textEncoder = Qwen3EncoderModel()
+                try Qwen3EncoderWeightLoader.load(baseDir: baseDir, into: textEncoder)
+                let textTokenizer = try Qwen3Tokenizer.textEncoder(baseDir: baseDir)
+                return LoadedModels(
+                    dit: dit, lm: lm, vae: vae, silenceLatent: silenceLatent,
+                    tokenizer: tokenizer, textEncoder: textEncoder, textTokenizer: textTokenizer
+                )
             }.value
 
             self.dit = models.dit
@@ -162,6 +175,8 @@ final class NativeInferenceEngine {
             self.vae = models.vae
             self.silenceLatent = models.silenceLatent
             self.tokenizer = models.tokenizer
+            self.textEncoder = models.textEncoder
+            self.textTokenizer = models.textTokenizer
             modelState = .ready
             log.info("MLX models loaded successfully", category: .inference)
         } catch {
@@ -176,7 +191,8 @@ final class NativeInferenceEngine {
         let (stream, continuation) = AsyncThrowingStream<GenerationProgress, Error>.makeStream()
 
         guard case .ready = modelState,
-              let dit = dit, let lm = lm, let vae = vae, let silenceLatent = silenceLatent else {
+              let dit = dit, let lm = lm, let vae = vae, let silenceLatent = silenceLatent,
+              let textEncoder = textEncoder, let textTokenizer = textTokenizer else {
             continuation.finish(throwing: NativeEngineError.modelsNotLoaded)
             return stream
         }
@@ -192,6 +208,8 @@ final class NativeInferenceEngine {
         let localVae       = vae
         let localSilence   = SendableMLXArray(value: silenceLatent)
         let localTokenizer = tokenizer
+        let localTextEncoder   = textEncoder
+        let localTextTokenizer = textTokenizer
         let generatedDir = FileUtilities.generatedAudioDirectory
         let duration     = request.duration
 
@@ -214,24 +232,24 @@ final class NativeInferenceEngine {
                 let chunkMasks = MLXArray.ones([1, T, acousticDim])
                 let contextLatents = concatenated([srcLatents, chunkMasks], axis: -1)
 
-                // Text/lyric conditioning is currently a no-op: the upstream pipeline
-                // requires a *bidirectional* text encoder (e.g. Qwen3-Embedding-0.6B) whose
-                // 1024-dim hidden states are projected through `encoder.text_projector`
-                // and the bidirectional `encoder.lyric_encoder`, then packed via
-                // `pack_sequences`. None of those external models are converted yet.
-                //
-                // The 5Hz `acestep-5Hz-lm-0.6B` LM is autoregressive (causal) and was
-                // trained to generate audio token codes for cover/audio2audio mode — it is
-                // **not** a substitute text encoder. Feeding its hidden states into
-                // `lyricEncoder` puts that encoder out of distribution and produces
-                // garbage cross-attention conditioning.
-                //
-                // Until a real text encoder is integrated, use the model's own learned
-                // `null_condition_emb` (the same null vector the model was trained to
-                // accept under CFG dropout). Output will be silence-like, but stable.
                 _ = localLm
                 _ = localTokenizer
-                let encH = localDit.nullConditionEmb
+
+                // ── Build cross-attention conditioning ─────────────────────────────
+                // Mirrors `AceStepConditionEncoder.forward` from upstream:
+                //   text:   tokens  → Qwen3 full forward → text_projector(1024→2048)
+                //   lyrics: tokens  → Qwen3 embed_tokens lookup only → lyric_encoder
+                //   pack(lyric_encoded, text_projected) along the sequence dim.
+                localCont.yield(.preparing(message: "Encoding conditioning..."))
+
+                let encH = NativeInferenceEngine.buildEncoderHiddenStates(
+                    request:        request,
+                    dit:            localDit,
+                    textEncoder:    localTextEncoder,
+                    textTokenizer:  localTextTokenizer,
+                    silenceLatent:  localSilence.value
+                )
+                eval(encH)
 
                 try Task.checkCancellation()
 
@@ -279,6 +297,122 @@ final class NativeInferenceEngine {
         activeContinuation?.finish(throwing: CancellationError())
         activeContinuation = nil
         isGenerating = false
+    }
+
+    // MARK: - Conditioning helpers
+
+    /// Builds the cross-attention condition tensor from a generation request.
+    ///
+    /// Mirrors `AceStepConditionEncoder.forward` in
+    /// `modeling_acestep_v15_turbo.py:1531-1558`:
+    ///   * `text_hidden_states  = text_encoder(text_ids)               → [1, S_text, 1024]`
+    ///   * `text_projected      = text_projector(text_hidden_states)   → [1, S_text, 2048]`
+    ///   * `lyric_hidden_states = text_encoder.embed_tokens(lyric_ids) → [1, S_lyric, 1024]`
+    ///   * `lyric_encoded       = lyric_encoder(lyric_hidden_states)   → [1, S_lyric, 2048]`
+    ///   * `packed              = pack(lyric_encoded, text_projected, masks)`
+    ///
+    /// The packed sequence with shape `[1, S_lyric+S_text, 2048]` is passed straight to the
+    /// DiT cross-attention. Empty/whitespace prompts and empty lyrics fall back to upstream's
+    /// learned `null_condition_emb` (the same vector seen during CFG dropout training).
+    private nonisolated static func buildEncoderHiddenStates(
+        request: GenerationParameters,
+        dit: ACEStepDiT,
+        textEncoder: Qwen3EncoderModel,
+        textTokenizer: Qwen3Tokenizer,
+        silenceLatent: MLXArray
+    ) -> MLXArray {
+        // ── Text branch (caption + tags) ─────────────────────────────────────
+        let textPrompt = formatTextPrompt(prompt: request.prompt, tags: request.tags)
+        let textTokens = clampTokenLength(textTokenizer.encode(textPrompt), max: 256)
+        var textBranch: (hidden: MLXArray, mask: MLXArray)? = nil
+        if !textTokens.isEmpty {
+            let textIds = MLXArray(textTokens.map { Int32($0) }).reshaped([1, textTokens.count])
+            let textHidden = textEncoder.encode(textIds)               // [1, S_text, 1024]
+            let textProjected = dit.textProjector(textHidden)          // [1, S_text, 2048]
+            let textMask = MLXArray.ones([1, textTokens.count]).asType(.int32)
+            textBranch = (textProjected, textMask)
+        }
+
+        // ── Lyric branch (only when non-empty) ───────────────────────────────
+        let lyricsRaw = request.lyrics.trimmingCharacters(in: .whitespacesAndNewlines)
+        var lyricBranch: (hidden: MLXArray, mask: MLXArray)? = nil
+        if !lyricsRaw.isEmpty {
+            let lyricPrompt = formatLyrics(lyrics: lyricsRaw, language: request.language)
+            let lyricTokens = clampTokenLength(textTokenizer.encode(lyricPrompt), max: 2048)
+            if !lyricTokens.isEmpty {
+                let lyricIds = MLXArray(lyricTokens.map { Int32($0) }).reshaped([1, lyricTokens.count])
+                let lyricEmbeds = textEncoder.embed(lyricIds)         // [1, S_lyric, 1024]
+                let lyricEncoded = dit.lyricEncoder(lyricEmbeds)      // [1, S_lyric, 2048]
+                let lyricMask = MLXArray.ones([1, lyricTokens.count]).asType(.int32)
+                lyricBranch = (lyricEncoded, lyricMask)
+            }
+        }
+
+        // ── Timbre branch ────────────────────────────────────────────────────
+        // Upstream `conditioning_batch.py:66-67` injects 30s of silence audio when
+        // no reference audio is supplied; `conditioning_embed.py:46-49` then
+        // substitutes the precomputed `silence_latent[:, :750, :]` slice. We mirror
+        // that for text2music — no reference audio path, just silence-latent timbre.
+        let timbreFrames = 750
+        let timbreInput = (try? SilenceLatentLoader.slice(silenceLatent, frames: timbreFrames))
+            ?? silenceLatent[0..., ..<min(timbreFrames, silenceLatent.shape[1]), 0...]
+        let timbrePooled = dit.timbreEncoder(timbreInput)              // [1, hiddenSize]
+        let timbreHidden = timbrePooled.reshaped([1, 1, dit.config.hiddenSize])
+        let timbreMask   = MLXArray.ones([1, 1]).asType(.int32)
+
+        // ── Pack — exactly the upstream order in AceStepConditionEncoder.forward
+        // (modeling_acestep_v15_turbo.py:1556-1557): pack(lyric, timbre), then
+        // pack(result, text). For text-only or lyric-only requests we still include
+        // timbre — that is what upstream does for plain text2music.
+        switch (lyricBranch, textBranch) {
+        case let (.some(l), .some(t)):
+            let (lt, ltMask) = PackSequences.pack(l.hidden, timbreHidden, l.mask, timbreMask)
+            let (packed, _)  = PackSequences.pack(lt, t.hidden, ltMask, t.mask)
+            return packed
+        case let (.some(l), .none):
+            let (packed, _) = PackSequences.pack(l.hidden, timbreHidden, l.mask, timbreMask)
+            return packed
+        case let (.none, .some(t)):
+            let (packed, _) = PackSequences.pack(timbreHidden, t.hidden, timbreMask, t.mask)
+            return packed
+        case (.none, .none):
+            return dit.nullConditionEmb
+        }
+    }
+
+    /// Mirrors upstream `_format_lyrics` (prompt_utils.py:27-29).
+    private nonisolated static func formatLyrics(lyrics: String, language: String) -> String {
+        let lang = language.isEmpty ? "unknown" : language
+        return "# Languages\n\(lang)\n\n# Lyric\n\(lyrics)<|endoftext|>"
+    }
+
+    /// Approximates upstream `SFT_GEN_PROMPT` (constants.py:158) using the values our
+    /// `GenerationParameters` actually carries (we don't have a separate caption/metas
+    /// split). Tags become `# Metas`; the prompt becomes `# Caption`.
+    private nonisolated static func formatTextPrompt(prompt: String, tags: [String]) -> String {
+        let caption     = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let metasJoined = tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                              .filter { !$0.isEmpty }
+                              .joined(separator: ", ")
+        let metasField  = metasJoined.isEmpty ? "" : "tags: \(metasJoined)"
+
+        // If both empty, return empty string so the caller can fall back to nullConditionEmb.
+        if caption.isEmpty && metasField.isEmpty { return "" }
+
+        return """
+        # Instruction
+        Fill the audio semantic mask based on the given conditions:
+
+        # Caption
+        \(caption)
+
+        # Metas
+        \(metasField)<|endoftext|>
+        """
+    }
+
+    private nonisolated static func clampTokenLength(_ ids: [Int], max: Int) -> [Int] {
+        ids.count > max ? Array(ids.prefix(max)) : ids
     }
 
     // MARK: - WAV Export
@@ -332,6 +466,8 @@ private struct LoadedModels: @unchecked Sendable {
     let vae: DCHiFiGANDecoder
     let silenceLatent: MLXArray
     let tokenizer: BPETokenizer?
+    let textEncoder: Qwen3EncoderModel
+    let textTokenizer: Qwen3Tokenizer
 }
 
 private struct SendableMLXArray: @unchecked Sendable {

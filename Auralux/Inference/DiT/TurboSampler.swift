@@ -2,17 +2,21 @@ import MLX
 import MLXNN
 import Foundation
 
-// MARK: - Turbo timestep schedule (shift=3, 8 NFE — from generate_audio in modeling_acestep_v15_turbo.py)
+// MARK: - Turbo timestep schedule (shift=1.0, 8 NFE)
+//
+// `shift=1.0` is the production default per `acestep/inference.py:136`. The
+// shift=3.0 schedule (also valid, in `SHIFT_TIMESTEPS[3.0]`) compresses the
+// late-denoising steps and yields ~15-20 % quieter audio empirically.
 
 private let kTurboSchedule: [Float] = [
     1.0,
-    0.9545454545454546,
-    0.9,
-    0.8333333333333334,
+    0.875,
     0.75,
-    0.6428571428571429,
+    0.625,
     0.5,
-    0.3,
+    0.375,
+    0.25,
+    0.125,
 ]
 
 // MARK: - TurboSampler

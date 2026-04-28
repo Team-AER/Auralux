@@ -140,12 +140,14 @@ final class ACEStepLMAttention: Module {
         k = gqaTile(k, fromKV: numKVHeads, toQ: numHeads)
         v = gqaTile(v, fromKV: numKVHeads, toQ: numHeads)
 
-        // Scaled dot-product: [B, H, L, L]
+        // Scaled dot-product: [B, H, L, L]. fp32 softmax for numerical stability
+        // (fp16 overflows on long sequences).
+        let origDtype = q.dtype
         var scores = matmul(q, k.transposed(0, 1, 3, 2)) * scale
         if let m = mask {
             scores = scores + m
         }
-        scores = softmax(scores, axis: -1)
+        scores = softmax(scores.asType(.float32), axis: -1).asType(origDtype)
 
         // Weighted sum → [B, L, H*D]
         let out = matmul(scores, v)

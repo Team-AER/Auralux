@@ -13,10 +13,12 @@ struct AceStepConfig: Sendable {
     let intermediateSize: Int
     let numDiTLayers: Int
     let numLyricEncoderLayers: Int
+    let numTimbreEncoderLayers: Int
     let numDetokenizerLayers: Int
     let patchSize: Int
     let poolWindowSize: Int
     let audioAcousticHiddenDim: Int
+    let timbreHiddenDim: Int
     let inChannels: Int
     let rmsNormEps: Float
     let ropeTheta: Float
@@ -31,10 +33,12 @@ struct AceStepConfig: Sendable {
         intermediateSize: Int        = 6144,
         numDiTLayers: Int            = 24,
         numLyricEncoderLayers: Int   = 8,
+        numTimbreEncoderLayers: Int  = 4,
         numDetokenizerLayers: Int    = 2,
         patchSize: Int               = 2,
         poolWindowSize: Int          = 5,
         audioAcousticHiddenDim: Int  = 64,
+        timbreHiddenDim: Int         = 64,
         inChannels: Int              = 192,
         rmsNormEps: Float            = 1e-6,
         ropeTheta: Float             = 1_000_000.0,
@@ -48,10 +52,12 @@ struct AceStepConfig: Sendable {
         self.intermediateSize       = intermediateSize
         self.numDiTLayers           = numDiTLayers
         self.numLyricEncoderLayers  = numLyricEncoderLayers
+        self.numTimbreEncoderLayers = numTimbreEncoderLayers
         self.numDetokenizerLayers   = numDetokenizerLayers
         self.patchSize              = patchSize
         self.poolWindowSize         = poolWindowSize
         self.audioAcousticHiddenDim = audioAcousticHiddenDim
+        self.timbreHiddenDim        = timbreHiddenDim
         self.inChannels             = inChannels
         self.rmsNormEps             = rmsNormEps
         self.ropeTheta              = ropeTheta
@@ -172,8 +178,11 @@ final class AceStepAttention: Module, @unchecked Sendable {
             v = repeated(v, count: g, axis: 1)
         }
 
+        // fp32 softmax for numerical stability — fp16 softmax can produce NaN on
+        // long sequences when pre-softmax scores accumulate near fp16 max.
+        let origDtype = q.dtype
         var w = matmul(q, k.transposed(0, 1, 3, 2)) * scale
-        w = softmax(w, axis: -1)
+        w = softmax(w.asType(.float32), axis: -1).asType(origDtype)
 
         let out = matmul(w, v)
             .transposed(0, 2, 1, 3)
@@ -306,10 +315,66 @@ final class AceLyricEncoder: Module, @unchecked Sendable {
     }
 
     // embeds: [B, S, textHiddenDim] → [B, S, hiddenSize]
+    //
+    // NOTE: residuals across the 8 transformer layers compound to magnitudes around
+    // ±3000 by layer 6 (verified against upstream Python). The final RMSNorm
+    // normalizes those down to ±10, but in fp16 the per-layer MLP/attn intermediates
+    // can hit Inf (max ≈ 65504) before reaching that final norm — softmax/RMSNorm
+    // then propagate NaN through the rest of the pipeline. Run the encoder body in
+    // fp32 to keep accumulation stable; cast back to the input dtype at the end.
     func callAsFunction(_ embeds: MLXArray) -> MLXArray {
-        var h = embedTokens(embeds)
+        let origDtype = embeds.dtype
+        var h = embedTokens(embeds).asType(.float32)
         for layer in layers { h = layer(h) }
-        return norm(h)
+        return norm(h).asType(origDtype)
+    }
+}
+
+// MARK: - Timbre Encoder
+// Used for reference-audio (or silence-latent) timbre conditioning.
+// Weight key prefix in checkpoint: encoder.timbre_encoder.*
+//
+// Upstream forward:
+//   * `embed_tokens(refer_audio_acoustic_packed [N, T, 64]) → [N, T, 2048]`
+//   * 4 transformer layers (`AceStepEncoderLayer`)
+//   * final RMSNorm
+//   * take position-0 hidden state per packed sample → [N, 2048]
+//   * `unpack_timbre_embeddings(...)` → `[B, max_count, 2048]` + mask `[B, max_count]`
+//
+// The `special_token` parameter exists in the checkpoint but the upstream's
+// forward path leaves it commented out (it would prepend a CLS-like token);
+// position 0 is the first audio frame. We mirror that exactly.
+
+final class AceStepTimbreEncoder: Module, @unchecked Sendable {
+    let embedTokens: Linear            // Linear(timbreHiddenDim=64, hiddenSize=2048)
+    var specialToken: MLXArray         // [1, 1, hiddenSize] — loaded but unused, matches upstream
+    let layers: [AceStepEncoderLayer]
+    let norm: RMSNorm
+
+    init(config: AceStepConfig) {
+        embedTokens  = Linear(config.timbreHiddenDim, config.hiddenSize, bias: true)
+        specialToken = MLXArray.zeros([1, 1, config.hiddenSize])
+        layers       = (0..<config.numTimbreEncoderLayers).map { _ in AceStepEncoderLayer(config: config) }
+        norm         = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        super.init()
+    }
+
+    /// Run timbre encoder on packed reference-audio latents.
+    ///
+    /// - referAudioPacked: `[N, T, timbreHiddenDim]` — for text2music with B=1,
+    ///   upstream uses `silence_latent[:, :750, :]` so N=1, T=750, dim=64.
+    /// - returns: pooled timbre embedding of shape `[N, hiddenSize]` (position-0
+    ///   hidden state). Wrap as `[B, count, hiddenSize]` at the call site for
+    ///   `pack_sequences`. For B=1, N=1 the wrap is a single `reshape`.
+    func callAsFunction(_ referAudioPacked: MLXArray) -> MLXArray {
+        let origDtype = referAudioPacked.dtype
+        // fp32 internally for the same overflow reasons documented on the lyric encoder.
+        var h = embedTokens(referAudioPacked).asType(.float32)
+        for layer in layers { h = layer(h) }
+        h = norm(h)
+        // Take the first position per packed sample → [N, hiddenSize]
+        let pooled = h[0..., 0, 0...]
+        return pooled.asType(origDtype)
     }
 }
 
@@ -448,7 +513,11 @@ final class AceStepDiTModel: Module, @unchecked Sendable {
 final class ACEStepDiT: Module, @unchecked Sendable {
     let decoder: AceStepDiTModel
     let lyricEncoder: AceLyricEncoder
+    let timbreEncoder: AceStepTimbreEncoder
     let detokenizer: AceAudioDetokenizer
+    /// Projects external text-encoder hidden states (1024) → DiT hidden size (2048).
+    /// Loaded from checkpoint key `encoder.text_projector.weight` (no bias).
+    let textProjector: Linear
     var nullConditionEmb: MLXArray   // [1, 1, hiddenSize]
     let config: AceStepConfig
 
@@ -456,7 +525,9 @@ final class ACEStepDiT: Module, @unchecked Sendable {
         self.config    = config
         decoder        = AceStepDiTModel(config: config)
         lyricEncoder   = AceLyricEncoder(config: config)
+        timbreEncoder  = AceStepTimbreEncoder(config: config)
         detokenizer    = AceAudioDetokenizer(config: config)
+        textProjector  = Linear(config.textHiddenDim, config.hiddenSize, bias: false)
         nullConditionEmb = MLXArray.zeros([1, 1, config.hiddenSize])
         super.init()
     }

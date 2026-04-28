@@ -141,14 +141,34 @@ def _remap_dit_key(key: str) -> Optional[str]:
     # ── Skip components not needed for basic inference ─────────────────────
     if key.startswith("tokenizer."):          # audio FSQ tokenizer
         return None
-    if key.startswith("encoder.timbre_encoder."):  # timbre conditioning
-        return None
     if key.startswith("encoder.attention_pooler."):  # attention pooler
         return None
+
+    # ── Timbre encoder (encoder.timbre_encoder.*) → timbreEncoder.* ────────
+    if key.startswith("encoder.timbre_encoder."):
+        rest = key[len("encoder.timbre_encoder."):]
+        m = re.match(r"^layers\.(\d+)\.(.+)$", rest)
+        if m:
+            idx, sub = m.group(1), m.group(2)
+            return f"timbreEncoder.layers.{idx}.{_remap_encoder_layer_key(sub)}"
+        top_map = {
+            "embed_tokens": "embedTokens",
+            "special_token": "specialToken",
+            "norm": "norm",
+        }
+        parts = rest.split(".", maxsplit=1)
+        head  = parts[0]
+        tail  = ("." + _camel_path(parts[1])) if len(parts) > 1 else ""
+        return "timbreEncoder." + top_map.get(head, _snake_to_camel(head)) + tail
 
     # ── Null condition embedding ────────────────────────────────────────────
     if key == "null_condition_emb":
         return "nullConditionEmb"
+
+    # ── Text projector (encoder.text_projector.weight, no bias) ─────────────
+    # Linear(text_hidden_dim=1024 → hidden_size=2048).
+    if key.startswith("encoder.text_projector."):
+        return "textProjector." + key[len("encoder.text_projector."):]
 
     # ── Decoder (AceStepDiTModel) ───────────────────────────────────────────
     if key.startswith("decoder."):
@@ -199,8 +219,28 @@ def _remap_dit_key(key: str) -> Optional[str]:
     return None
 
 
+# Block-level remap shared by the 5Hz LM and the Qwen3-Embedding text encoder.
+# Both are Qwen3-derived: same RMSNorm + GQA + RoPE + SwiGLU MLP layout.
+_QWEN3_BLOCK_MAP: Dict[str, str] = {
+    "input_layernorm.weight":          "inputLayernorm.weight",
+    "post_attention_layernorm.weight": "postAttentionLayernorm.weight",
+    "self_attn.q_proj.weight":         "selfAttn.qProj.weight",
+    "self_attn.q_proj.bias":           "selfAttn.qProj.bias",
+    "self_attn.k_proj.weight":         "selfAttn.kProj.weight",
+    "self_attn.k_proj.bias":           "selfAttn.kProj.bias",
+    "self_attn.v_proj.weight":         "selfAttn.vProj.weight",
+    "self_attn.v_proj.bias":           "selfAttn.vProj.bias",
+    "self_attn.o_proj.weight":         "selfAttn.oProj.weight",
+    "self_attn.q_norm.weight":         "selfAttn.qNorm.weight",
+    "self_attn.k_norm.weight":         "selfAttn.kNorm.weight",
+    "mlp.gate_proj.weight":            "mlp.gateProj.weight",
+    "mlp.up_proj.weight":              "mlp.upProj.weight",
+    "mlp.down_proj.weight":            "mlp.downProj.weight",
+}
+
+
 def _remap_lm_key(key: str) -> Optional[str]:
-    """Map a Qwen2-style LM key to Swift module path."""
+    """Map a Qwen2/Qwen3-style LM key (with `model.` prefix) to Swift module path."""
     lm_map = {
         "model.norm.weight": "norm.weight",
         "lm_head.weight":    "lmHead.weight",
@@ -215,28 +255,42 @@ def _remap_lm_key(key: str) -> Optional[str]:
     m = re.match(r"^model\.layers\.(\d+)\.(.+)$", key)
     if m:
         idx, rest = m.group(1), m.group(2)
-        block_map = {
-            "input_layernorm.weight":         "inputLayernorm.weight",
-            "post_attention_layernorm.weight": "postAttentionLayernorm.weight",
-            "self_attn.q_proj.weight":         "selfAttn.qProj.weight",
-            "self_attn.q_proj.bias":           "selfAttn.qProj.bias",
-            "self_attn.k_proj.weight":         "selfAttn.kProj.weight",
-            "self_attn.k_proj.bias":           "selfAttn.kProj.bias",
-            "self_attn.v_proj.weight":         "selfAttn.vProj.weight",
-            "self_attn.v_proj.bias":           "selfAttn.vProj.bias",
-            "self_attn.o_proj.weight":         "selfAttn.oProj.weight",
-            "self_attn.q_norm.weight":         "selfAttn.qNorm.weight",
-            "self_attn.k_norm.weight":         "selfAttn.kNorm.weight",
-            "mlp.gate_proj.weight":            "mlp.gateProj.weight",
-            "mlp.up_proj.weight":              "mlp.upProj.weight",
-            "mlp.down_proj.weight":            "mlp.downProj.weight",
-        }
-        if rest in block_map:
-            return f"layers.{idx}.{block_map[rest]}"
+        if rest in _QWEN3_BLOCK_MAP:
+            return f"layers.{idx}.{_QWEN3_BLOCK_MAP[rest]}"
         print(f"  [skip lm] layers.{idx}.{rest}", file=sys.stderr)
         return None
 
     print(f"  [unknown lm] {key}", file=sys.stderr)
+    return None
+
+
+def _remap_text_encoder_key(key: str) -> Optional[str]:
+    """Map a Qwen3-Embedding-0.6B key to Swift module path.
+
+    Differences vs the 5Hz LM dump:
+      * No `model.` prefix on top-level keys.
+      * Tied word embeddings, so no `lm_head.weight`.
+    """
+    if key == "norm.weight":
+        return "norm.weight"
+
+    if key == "lm_head.weight":
+        # Tied to embed_tokens; safetensors should not include this, but tolerate.
+        return None
+
+    m = re.match(r"^embed_tokens\.(.+)$", key)
+    if m:
+        return "embedTokens." + m.group(1)
+
+    m = re.match(r"^layers\.(\d+)\.(.+)$", key)
+    if m:
+        idx, rest = m.group(1), m.group(2)
+        if rest in _QWEN3_BLOCK_MAP:
+            return f"layers.{idx}.{_QWEN3_BLOCK_MAP[rest]}"
+        print(f"  [skip text] layers.{idx}.{rest}", file=sys.stderr)
+        return None
+
+    print(f"  [unknown text] {key}", file=sys.stderr)
     return None
 
 
@@ -454,6 +508,58 @@ def convert_silence_latent(src_pt: Path, output_dir: Path, dtype_str: str) -> bo
     return True
 
 
+def convert_text_encoder(src_safetensors: Path, output_dir: Path, dtype_str: str) -> bool:
+    """Convert Qwen3-Embedding-0.6B to MLX-native safetensors.
+
+    Used by the DiT for text/lyric conditioning (`encoder.lyric_encoder.embed_tokens` and
+    `encoder.text_projector` consume 1024-dim hidden states from this model).
+    """
+    import numpy as np
+    from safetensors.numpy import save_file as save_np
+
+    dtype_map = {"float32": np.float32, "float16": np.float16}
+    target_dtype = dtype_map.get(dtype_str, np.float16)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    converted: Dict[str, Any] = {}
+    skipped = 0
+
+    print(f"  Converting {src_safetensors.name} …")
+    source = _load_safetensors_numpy(src_safetensors)
+    keys = list(source.keys())
+    print(f"  Source tensors: {len(keys)}")
+    for key in keys:
+        tensor = source[key]
+        new_key = _remap_text_encoder_key(key)
+        if new_key is None:
+            skipped += 1
+            continue
+        if tensor.dtype in (np.float32, np.float16, np.float64):
+            tensor = tensor.astype(target_dtype)
+        converted[new_key] = np.ascontiguousarray(tensor)
+
+    out_path = output_dir / "text_weights.safetensors"
+    print(f"  Saving {len(converted)} tensors → {out_path} ({skipped} skipped) …")
+    save_np(converted, str(out_path))
+
+    saved_keys = list(_load_safetensors_numpy(out_path).keys())
+    print(f"  ✓ Text encoder: {len(saved_keys)} tensors written ({skipped} skipped)")
+    return True
+
+
+def copy_text_tokenizer(src_dir: Path, output_dir: Path) -> None:
+    """Copy Qwen3-Embedding tokenizer files with `text_` prefix to avoid LM-tokenizer collision."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for name in ["tokenizer.json", "tokenizer_config.json", "vocab.json",
+                 "merges.txt", "special_tokens_map.json", "added_tokens.json",
+                 "config.json"]:
+        src = src_dir / name
+        if src.exists():
+            dst = output_dir / ("text_" + name)
+            shutil.copy2(src, dst)
+            print(f"  Copied → {dst.name}")
+
+
 def convert_lm(src_safetensors: Path, output_dir: Path, dtype_str: str) -> bool:
     import numpy as np
     from safetensors.numpy import save_file as save_np
@@ -605,6 +711,7 @@ def validate_output(output_dir: Path) -> bool:
     silence_path = output_dir / "dit" / "silence_latent.safetensors"
     lm_path      = output_dir / "lm"  / "lm_weights.safetensors"
     vae_path     = output_dir / "vae" / "vae_weights.safetensors"
+    text_path    = output_dir / "text" / "text_weights.safetensors"
 
     ok = True
     for label, path, expected_min in [
@@ -612,6 +719,7 @@ def validate_output(output_dir: Path) -> bool:
         ("Silence latent", silence_path, 1),
         ("LM",  lm_path,  50),
         ("VAE", vae_path, 50),
+        ("Text encoder", text_path, 100),
     ]:
         if not path.exists():
             print(f"  ✗ {label}: file not found at {path}", file=sys.stderr)
@@ -639,6 +747,9 @@ def validate_output(output_dir: Path) -> bool:
             "lyricEncoder.embedTokens.weight",
             "lyricEncoder.norm.weight",
             "nullConditionEmb",
+            "textProjector.weight",
+            "timbreEncoder.embedTokens.weight",
+            "timbreEncoder.norm.weight",
         ]
         for k in critical:
             if k in keys:
@@ -673,6 +784,23 @@ def validate_output(output_dir: Path) -> bool:
                 print(f"  ✓ LM key present: {k}")
             else:
                 print(f"  ✗ LM key MISSING: {k}", file=sys.stderr)
+                ok = False
+
+    # Check for critical text-encoder keys (Qwen3-Embedding-0.6B)
+    if text_path.exists():
+        keys = set(_load_safetensors_numpy(text_path).keys())
+        critical_text = [
+            "embedTokens.weight",
+            "layers.0.selfAttn.qProj.weight",
+            "layers.0.selfAttn.qNorm.weight",
+            "layers.0.inputLayernorm.weight",
+            "norm.weight",
+        ]
+        for k in critical_text:
+            if k in keys:
+                print(f"  ✓ Text encoder key present: {k}")
+            else:
+                print(f"  ✗ Text encoder key MISSING: {k}", file=sys.stderr)
                 ok = False
 
     return ok
@@ -725,6 +853,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--skip-vae", action="store_true", help="Skip VAE download + conversion"
+    )
+    parser.add_argument(
+        "--skip-text", action="store_true", help="Skip text-encoder (Qwen3-Embedding) download + conversion"
     )
     parser.add_argument(
         "--cache-dir",
@@ -828,6 +959,29 @@ def main() -> int:
             ok &= convert_vae(vae_src, out_dir / "vae", args.dtype)
         else:
             print(f"ERROR: VAE weights not found at {vae_src}", file=sys.stderr)
+            ok = False
+
+    # ── Text encoder conversion (Qwen3-Embedding-0.6B) ───────────────────────
+    if not args.skip_text:
+        text_cache = cache_dir / "text"
+        text_src   = text_cache / "Qwen3-Embedding-0.6B" / "model.safetensors"
+
+        if not text_src.exists():
+            print(f"\n[Text] Downloading Qwen3-Embedding-0.6B from ACE-Step/Ace-Step1.5 …")
+            _download_dir(
+                repo_id="ACE-Step/Ace-Step1.5",
+                subdir="Qwen3-Embedding-0.6B",
+                local_dir=text_cache,
+                token=token,
+                patterns=["Qwen3-Embedding-0.6B/*"],
+            )
+
+        if text_src.exists():
+            print(f"\n[Text] Converting → {out_dir}/text/ …")
+            ok &= convert_text_encoder(text_src, out_dir / "text", args.dtype)
+            copy_text_tokenizer(text_src.parent, out_dir / "text")
+        else:
+            print(f"ERROR: Text-encoder weights not found at {text_src}", file=sys.stderr)
             ok = False
 
     # ── Validate output ───────────────────────────────────────────────────────
