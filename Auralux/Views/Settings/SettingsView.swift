@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(SettingsViewModel.self) private var viewModel
+    @Environment(NativeInferenceEngine.self) private var engine
 
     var body: some View {
         ScrollView {
@@ -36,6 +37,20 @@ struct SettingsView: View {
                             in: 1...4
                         )
                         .fixedSize()
+                    }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent("Load 5Hz LM") {
+                            Toggle("", isOn: Bindable(viewModel).useLM)
+                                .labelsHidden()
+                                .onChange(of: viewModel.useLM) { _, _ in
+                                    Task { await engine.loadModels() }
+                                }
+                        }
+                        Text("Adds ~1.2 GB resident; required for LM-driven cover/repaint modes (work in progress).")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }

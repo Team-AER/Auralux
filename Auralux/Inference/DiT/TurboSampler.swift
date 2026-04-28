@@ -38,16 +38,18 @@ struct TurboSampler {
     /// Run the full denoising loop.
     ///
     /// - Parameters:
-    ///   - noise:                [B, T, audioAcousticHiddenDim] initial Gaussian noise
-    ///   - contextLatents:       [B, T, 128] context (silence/src latents + chunk masks)
-    ///   - encoderHiddenStates:  [B, S, hiddenSize] from lyric/condition encoder
-    ///   - model:                The DiT decoder
-    ///   - onStep:               Progress callback (step index, total steps)
+    ///   - noise:                 [B, T, audioAcousticHiddenDim] initial Gaussian noise
+    ///   - contextLatents:        [B, T, 128] context (silence/src latents + chunk masks)
+    ///   - encoderHiddenStates:   [B, S, hiddenSize] from lyric/condition encoder
+    ///   - encoderAttentionMask:  [B, S] int 0/1 packed pad mask, or `nil` (no padding)
+    ///   - model:                 The DiT decoder
+    ///   - onStep:                Progress callback (step index, total steps)
     /// - Returns: Denoised acoustic latent [B, T, audioAcousticHiddenDim]
     func sample(
         noise: MLXArray,
         contextLatents: MLXArray,
         encoderHiddenStates: MLXArray,
+        encoderAttentionMask: MLXArray? = nil,
         model: AceStepDiTModel,
         onStep: ((Int, Int) -> Void)? = nil
     ) -> MLXArray {
@@ -58,11 +60,12 @@ struct TurboSampler {
             let tTensor = MLXArray(Array(repeating: t, count: B))
 
             let vt = model.callAsFunction(
-                hiddenStates:        xt,
-                contextLatents:      contextLatents,
-                timestep:            tTensor,
-                timestepR:           tTensor,
-                encoderHiddenStates: encoderHiddenStates
+                hiddenStates:         xt,
+                contextLatents:       contextLatents,
+                timestep:             tTensor,
+                timestepR:            tTensor,
+                encoderHiddenStates:  encoderHiddenStates,
+                encoderAttentionMask: encoderAttentionMask
             )
 
             if i == schedule.count - 1 {

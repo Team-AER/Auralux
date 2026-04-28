@@ -1,4 +1,5 @@
 import AppKit
+import MLX
 import SwiftData
 import SwiftUI
 
@@ -32,6 +33,13 @@ struct AuraluxApp: App {
     private let modelContainer: ModelContainer
 
     init() {
+        // Cap the MLX freed-buffer pool. By default MLX retains every buffer it has
+        // allocated for reuse, which makes resident memory grow to the high-water mark
+        // of the union of every phase (weight load + DiT activations + VAE decode) and
+        // never shrink. Halve it under low-memory mode.
+        let lowMemory = UserDefaults.standard.bool(forKey: "settings.lowMemoryMode")
+        MLX.Memory.cacheLimit = (lowMemory ? 512 : 1024) * 1024 * 1024
+
         let engine = NativeInferenceEngine()
         _engine = State(initialValue: engine)
         _generationViewModel = State(initialValue: GenerationViewModel(engine: engine))

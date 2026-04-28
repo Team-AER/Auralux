@@ -24,6 +24,8 @@ struct AceStepConfig: Sendable {
     let ropeTheta: Float
     let textHiddenDim: Int
     let freqDim: Int
+    let slidingWindow: Int
+    let useSlidingWindow: Bool
 
     init(
         hiddenSize: Int              = 2048,
@@ -43,7 +45,9 @@ struct AceStepConfig: Sendable {
         rmsNormEps: Float            = 1e-6,
         ropeTheta: Float             = 1_000_000.0,
         textHiddenDim: Int           = 1024,
-        freqDim: Int                 = 256
+        freqDim: Int                 = 256,
+        slidingWindow: Int           = 128,
+        useSlidingWindow: Bool       = true
     ) {
         self.hiddenSize             = hiddenSize
         self.numHeads               = numHeads
@@ -63,6 +67,15 @@ struct AceStepConfig: Sendable {
         self.ropeTheta              = ropeTheta
         self.textHiddenDim          = textHiddenDim
         self.freqDim                = freqDim
+        self.slidingWindow          = slidingWindow
+        self.useSlidingWindow       = useSlidingWindow
+    }
+
+    // Per-layer attention type — mirrors `configuration_acestep_v15.py:251-254`:
+    //   layer_types[i] = "sliding_attention" if (i+1)%2 else "full_attention"
+    // i.e. even-index layers are sliding, odd-index layers are full.
+    func attentionType(for layerIndex: Int) -> String {
+        layerIndex % 2 == 0 ? "sliding_attention" : "full_attention"
     }
 }
 
@@ -76,6 +89,32 @@ private func sinusoidalEmbedding(t: MLXArray, dim: Int) -> MLXArray {
     let tCol = t.reshaped([-1, 1]).asType(.float32)
     let args = tCol * freqs.reshaped([1, -1])
     return concatenated([cos(args), sin(args)], axis: -1)
+}
+
+// MARK: - Attention mask helpers
+//
+// Match upstream `create_4d_mask` (modeling_acestep_v15_turbo.py:53-132):
+// bidirectional, optionally sliding-window. Returns additive masks (0 = keep,
+// -1e9 = block) broadcast-compatible with `[B, H, L_q, L_kv]` attention scores.
+
+/// Sliding-window mask `[1, 1, L, L]` for bidirectional attention with window `W`:
+/// `0` where `|i - j| <= W`, `-1e9` otherwise. Returns `nil` for trivial sequences.
+private func slidingWindowMask(seqLen L: Int, window W: Int) -> MLXArray? {
+    guard L > 1, W >= 0 else { return nil }
+    let i = MLXArray(Array(0..<L).map { Float($0) }).reshaped([L, 1])
+    let j = MLXArray(Array(0..<L).map { Float($0) }).reshaped([1, L])
+    // exceeded > 0 when |i-j| > W; clip to {0,1} via the same trick used in causalMask.
+    let exceeded = relu(abs(i - j) - Float(W))
+    let binary   = exceeded - relu(exceeded - Float(1.0))   // {0, 1}
+    return (binary * Float(-1e9)).reshaped([1, 1, L, L])
+}
+
+/// Convert a `[B, S]` int padding mask (1 = valid, 0 = pad) into an additive `[B, 1, 1, S]`
+/// key-padding mask. Broadcasts against `[B, H, L_q, S]` cross-attn scores and `[B, H, S, S]`
+/// self-attn scores.
+private func keyPaddingMask(_ pad: MLXArray) -> MLXArray {
+    let invalid = Float(1.0) - pad.asType(.float32)
+    return (invalid * Float(-1e9)).reshaped([pad.shape[0], 1, 1, pad.shape[1]])
 }
 
 // MARK: - Timestep Embedder
@@ -142,9 +181,12 @@ final class AceStepAttention: Module, @unchecked Sendable {
         super.init()
     }
 
+    /// `mask` is an additive 4D tensor (broadcast-compatible with `[B, H, L, S]`).
+    /// `nil` → no masking (full bidirectional).
     func callAsFunction(
         _ hidden: MLXArray,
         encoderHidden: MLXArray? = nil,
+        mask: MLXArray? = nil,
         offset: Int = 0
     ) -> MLXArray {
         let B  = hidden.shape[0]
@@ -182,6 +224,9 @@ final class AceStepAttention: Module, @unchecked Sendable {
         // long sequences when pre-softmax scores accumulate near fp16 max.
         let origDtype = q.dtype
         var w = matmul(q, k.transposed(0, 1, 3, 2)) * scale
+        if let m = mask {
+            w = w + m.asType(w.dtype)
+        }
         w = softmax(w.asType(.float32), axis: -1).asType(origDtype)
 
         let out = matmul(w, v)
@@ -231,8 +276,8 @@ final class AceStepEncoderLayer: Module, @unchecked Sendable {
         super.init()
     }
 
-    func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
-        let h = x + selfAttn(inputLayernorm(x), offset: offset)
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, offset: Int = 0) -> MLXArray {
+        let h = x + selfAttn(inputLayernorm(x), mask: mask, offset: offset)
         return h + mlp(postAttentionLayernorm(h))
     }
 }
@@ -270,10 +315,14 @@ final class AceStepDiTLayer: Module, @unchecked Sendable {
     }
 
     // timestepProj: [B, 6, hiddenSize] from TimestepEmbedder
+    // selfMask:    additive `[1,1,L,L]` or `[B,1,L,L]` for self-attn (sliding-window or none).
+    // encoderMask: additive `[B,1,1,S]` for cross-attn (key padding).
     func callAsFunction(
         _ x: MLXArray,
         timestepProj: MLXArray,
         encoderHidden: MLXArray,
+        selfMask: MLXArray? = nil,
+        encoderMask: MLXArray? = nil,
         offset: Int = 0
     ) -> MLXArray {
         let B   = x.shape[0]
@@ -289,9 +338,9 @@ final class AceStepDiTLayer: Module, @unchecked Sendable {
         let gateMLP   = mod[0..., 5, 0...].reshaped([B, 1, dim])
 
         let n1 = selfAttnNorm(x) * (1 + scaleMSA) + shiftMSA
-        var h  = x + gateMSA * selfAttn(n1, offset: offset)
+        var h  = x + gateMSA * selfAttn(n1, mask: selfMask, offset: offset)
 
-        h = h + crossAttn(crossAttnNorm(h), encoderHidden: encoderHidden)
+        h = h + crossAttn(crossAttnNorm(h), encoderHidden: encoderHidden, mask: encoderMask)
 
         let n3 = mlpNorm(h) * (1 + scaleMLP) + shiftMLP
         return h + gateMLP * mlp(n3)
@@ -306,8 +355,10 @@ final class AceLyricEncoder: Module, @unchecked Sendable {
     let embedTokens: Linear         // Linear(textHiddenDim=1024, hiddenSize=2048)
     let layers: [AceStepEncoderLayer]
     let norm: RMSNorm
+    let config: AceStepConfig
 
     init(config: AceStepConfig) {
+        self.config = config
         embedTokens = Linear(config.textHiddenDim, config.hiddenSize, bias: true)
         layers      = (0..<config.numLyricEncoderLayers).map { _ in AceStepEncoderLayer(config: config) }
         norm        = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
@@ -322,10 +373,22 @@ final class AceLyricEncoder: Module, @unchecked Sendable {
     // can hit Inf (max ≈ 65504) before reaching that final norm — softmax/RMSNorm
     // then propagate NaN through the rest of the pipeline. Run the encoder body in
     // fp32 to keep accumulation stable; cast back to the input dtype at the end.
+    //
+    // Layers alternate `sliding_attention` / `full_attention` per `attentionType(for:)` —
+    // sliding layers get a `[1,1,L,L]` window mask, full layers get `nil`.
     func callAsFunction(_ embeds: MLXArray) -> MLXArray {
         let origDtype = embeds.dtype
         var h = embedTokens(embeds).asType(.float32)
-        for layer in layers { h = layer(h) }
+        let L = h.shape[1]
+        let slidingMask = config.useSlidingWindow
+            ? slidingWindowMask(seqLen: L, window: config.slidingWindow)
+            : nil
+        for (idx, layer) in layers.enumerated() {
+            let mask: MLXArray? = config.attentionType(for: idx) == "sliding_attention"
+                ? slidingMask
+                : nil
+            h = layer(h, mask: mask)
+        }
         return norm(h).asType(origDtype)
     }
 }
@@ -350,8 +413,10 @@ final class AceStepTimbreEncoder: Module, @unchecked Sendable {
     var specialToken: MLXArray         // [1, 1, hiddenSize] — loaded but unused, matches upstream
     let layers: [AceStepEncoderLayer]
     let norm: RMSNorm
+    let config: AceStepConfig
 
     init(config: AceStepConfig) {
+        self.config  = config
         embedTokens  = Linear(config.timbreHiddenDim, config.hiddenSize, bias: true)
         specialToken = MLXArray.zeros([1, 1, config.hiddenSize])
         layers       = (0..<config.numTimbreEncoderLayers).map { _ in AceStepEncoderLayer(config: config) }
@@ -366,11 +431,22 @@ final class AceStepTimbreEncoder: Module, @unchecked Sendable {
     /// - returns: pooled timbre embedding of shape `[N, hiddenSize]` (position-0
     ///   hidden state). Wrap as `[B, count, hiddenSize]` at the call site for
     ///   `pack_sequences`. For B=1, N=1 the wrap is a single `reshape`.
+    ///
+    /// Layers alternate `sliding_attention` / `full_attention` (4 layers → s,f,s,f).
     func callAsFunction(_ referAudioPacked: MLXArray) -> MLXArray {
         let origDtype = referAudioPacked.dtype
         // fp32 internally for the same overflow reasons documented on the lyric encoder.
         var h = embedTokens(referAudioPacked).asType(.float32)
-        for layer in layers { h = layer(h) }
+        let L = h.shape[1]
+        let slidingMask = config.useSlidingWindow
+            ? slidingWindowMask(seqLen: L, window: config.slidingWindow)
+            : nil
+        for (idx, layer) in layers.enumerated() {
+            let mask: MLXArray? = config.attentionType(for: idx) == "sliding_attention"
+                ? slidingMask
+                : nil
+            h = layer(h, mask: mask)
+        }
         h = norm(h)
         // Take the first position per packed sample → [N, hiddenSize]
         let pooled = h[0..., 0, 0...]
@@ -428,8 +504,10 @@ final class AceStepDiTModel: Module, @unchecked Sendable {
     let projOut: ConvTransposed1d
     var scaleShiftTable: MLXArray      // [1, 2, hiddenSize]
     let patchSize: Int
+    let config: AceStepConfig
 
     init(config: AceStepConfig) {
+        self.config       = config
         patchSize         = config.patchSize
         timeEmbed         = TimestepEmbedder(freqDim: config.freqDim, hiddenSize: config.hiddenSize)
         timeEmbedR        = TimestepEmbedder(freqDim: config.freqDim, hiddenSize: config.hiddenSize)
@@ -452,16 +530,19 @@ final class AceStepDiTModel: Module, @unchecked Sendable {
         super.init()
     }
 
-    // hiddenStates:     [B, T, audioAcousticHiddenDim]  — noisy latent
-    // contextLatents:   [B, T, inChannels - audioAcousticHiddenDim] — src + chunk mask
-    // timestep/timestepR: [B] float in [0,1]
-    // encoderHiddenStates: [B, S, hiddenSize] — from lyric encoder
+    // hiddenStates:        [B, T, audioAcousticHiddenDim]  — noisy latent
+    // contextLatents:      [B, T, inChannels - audioAcousticHiddenDim] — src + chunk mask
+    // timestep/timestepR:  [B] float in [0,1]
+    // encoderHiddenStates: [B, S, hiddenSize] — packed condition (lyric/timbre/text)
+    // encoderAttentionMask:[B, S] int 0/1 — pad mask from PackSequences (1 = valid).
+    //                       `nil` skips key-padding in cross-attn.
     func callAsFunction(
         hiddenStates: MLXArray,
         contextLatents: MLXArray,
         timestep: MLXArray,
         timestepR: MLXArray,
-        encoderHiddenStates: MLXArray
+        encoderHiddenStates: MLXArray,
+        encoderAttentionMask: MLXArray? = nil
     ) -> MLXArray {
         let B   = hiddenStates.shape[0]
         let dim = scaleShiftTable.shape[2]
@@ -484,14 +565,32 @@ final class AceStepDiTModel: Module, @unchecked Sendable {
         // Project encoder hidden states
         let encH = conditionEmbedder(encoderHiddenStates)
 
+        // Build attention masks once.
+        // Self-attn sliding mask is over the patched audio sequence (T_p = T // patchSize).
+        // Cross-attn key-padding mask is over the packed encoder sequence (S).
+        let Tp = x.shape[1]
+        let slidingSelfMask = (config.useSlidingWindow && Tp > 1)
+            ? slidingWindowMask(seqLen: Tp, window: config.slidingWindow)
+            : nil
+        let crossMask: MLXArray? = encoderAttentionMask.map { keyPaddingMask($0) }
+
         // Timestep embeddings: temb [B, H], proj [B, 6, H]
         let (tembT, projT) = timeEmbed(timestep)
         let (tembR, projR) = timeEmbedR(timestep - timestepR)
         let temb           = tembT + tembR
         let timestepProj   = projT + projR
 
-        for layer in layers {
-            x = layer(x, timestepProj: timestepProj, encoderHidden: encH)
+        for (idx, layer) in layers.enumerated() {
+            let selfMask: MLXArray? = config.attentionType(for: idx) == "sliding_attention"
+                ? slidingSelfMask
+                : nil
+            x = layer(
+                x,
+                timestepProj: timestepProj,
+                encoderHidden: encH,
+                selfMask: selfMask,
+                encoderMask: crossMask
+            )
         }
 
         // AdaLN output norm

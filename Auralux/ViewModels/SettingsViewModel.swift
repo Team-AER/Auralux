@@ -18,6 +18,15 @@ final class SettingsViewModel {
         didSet { save(key: Keys.lowMemoryMode, value: lowMemoryMode) }
     }
 
+    /// Loads the 5Hz audio-token LM (`acestep-5Hz-lm-0.6B`) at app start.
+    ///
+    /// Off by default: the LM costs ~1.2 GB resident and is currently used by
+    /// no generation path. Wiring (FSQ codebooks → detokenize → src_latents)
+    /// lands in a follow-up. Toggling this requires a model reload.
+    var useLM = false {
+        didSet { save(key: Keys.useLM, value: useLM) }
+    }
+
     var autoStartServer = true {
         didSet { save(key: Keys.autoStartServer, value: autoStartServer) }
     }
@@ -47,6 +56,7 @@ final class SettingsViewModel {
     func resetToDefaults() {
         quantizationMode = .fp16
         lowMemoryMode = false
+        useLM = false
         autoStartServer = true
         maxConcurrentJobs = 1
         defaultExportFormat = .wav
@@ -54,9 +64,10 @@ final class SettingsViewModel {
 
     // MARK: - Persistence
 
-    private enum Keys {
+    enum Keys {
         static let quantizationMode = "settings.quantizationMode"
         static let lowMemoryMode = "settings.lowMemoryMode"
+        static let useLM = "settings.useLM"
         static let autoStartServer = "settings.autoStartServer"
         static let maxConcurrentJobs = "settings.maxConcurrentJobs"
         static let defaultExportFormat = "settings.defaultExportFormat"
@@ -69,6 +80,9 @@ final class SettingsViewModel {
         }
         if defaults.object(forKey: Keys.lowMemoryMode) != nil {
             lowMemoryMode = defaults.bool(forKey: Keys.lowMemoryMode)
+        }
+        if defaults.object(forKey: Keys.useLM) != nil {
+            useLM = defaults.bool(forKey: Keys.useLM)
         }
         if defaults.object(forKey: Keys.autoStartServer) != nil {
             autoStartServer = defaults.bool(forKey: Keys.autoStartServer)

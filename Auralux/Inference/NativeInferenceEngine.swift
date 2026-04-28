@@ -147,20 +147,31 @@ final class NativeInferenceEngine {
         log.info("Loading MLX models from \(mlxModelDirectory.path)", category: .inference)
 
         let baseDir = mlxModelDirectory
+        // Read at the call site so the detached task captures a sendable Bool, not the
+        // @MainActor-bound view model. UserDefaults is process-wide and safe to read here.
+        let loadLM = UserDefaults.standard.bool(forKey: SettingsViewModel.Keys.useLM)
 
         do {
             let models = try await Task<LoadedModels, Error>.detached(priority: .userInitiated) {
                 let dit = ACEStepDiT()
                 try DiTWeightLoader.load(baseDir: baseDir, into: dit)
                 let silenceLatent = try SilenceLatentLoader.load(baseDir: baseDir)
-                let lm = ACEStepLMModel()
-                try LMWeightLoader.load(baseDir: baseDir, into: lm)
+                // Skip LM allocation and weight load entirely when the toggle is off —
+                // the LM is ~1.2 GB resident and currently unused by every code path.
+                var lm: ACEStepLMModel? = nil
+                if loadLM {
+                    let model = ACEStepLMModel()
+                    try LMWeightLoader.load(baseDir: baseDir, into: model)
+                    lm = model
+                }
                 let vae = DCHiFiGANDecoder()
                 try VAEWeightLoader.load(baseDir: baseDir, into: vae)
-                let tokenizer = try? BPETokenizer(
-                    vocabURL: baseDir.appendingPathComponent("lm/lm_vocab.json"),
-                    mergesURL: baseDir.appendingPathComponent("lm/lm_merges.txt")
-                )
+                let tokenizer = loadLM
+                    ? (try? BPETokenizer(
+                        vocabURL: baseDir.appendingPathComponent("lm/lm_vocab.json"),
+                        mergesURL: baseDir.appendingPathComponent("lm/lm_merges.txt")
+                    ))
+                    : nil
                 let textEncoder = Qwen3EncoderModel()
                 try Qwen3EncoderWeightLoader.load(baseDir: baseDir, into: textEncoder)
                 let textTokenizer = try Qwen3Tokenizer.textEncoder(baseDir: baseDir)
@@ -177,6 +188,9 @@ final class NativeInferenceEngine {
             self.tokenizer = models.tokenizer
             self.textEncoder = models.textEncoder
             self.textTokenizer = models.textTokenizer
+            // Drop any transient buffers held by safetensors loaders / one-off `eval`s
+            // before we sit idle waiting for a generate request.
+            MLX.Memory.clearCache()
             modelState = .ready
             log.info("MLX models loaded successfully", category: .inference)
         } catch {
@@ -190,8 +204,11 @@ final class NativeInferenceEngine {
     func generate(request: GenerationParameters) -> AsyncThrowingStream<GenerationProgress, Error> {
         let (stream, continuation) = AsyncThrowingStream<GenerationProgress, Error>.makeStream()
 
+        // Generation does not currently use `lm` or its tokenizer — they're loaded
+        // only when `settings.useLM` is on (gated in `loadModels`) so the audio-code
+        // pipeline can pick them up later. Don't require them here.
         guard case .ready = modelState,
-              let dit = dit, let lm = lm, let vae = vae, let silenceLatent = silenceLatent,
+              let dit = dit, let vae = vae, let silenceLatent = silenceLatent,
               let textEncoder = textEncoder, let textTokenizer = textTokenizer else {
             continuation.finish(throwing: NativeEngineError.modelsNotLoaded)
             return stream
@@ -204,10 +221,8 @@ final class NativeInferenceEngine {
 
         let localCont      = continuation
         let localDit       = dit
-        let localLm        = lm
         let localVae       = vae
         let localSilence   = SendableMLXArray(value: silenceLatent)
-        let localTokenizer = tokenizer
         let localTextEncoder   = textEncoder
         let localTextTokenizer = textTokenizer
         let generatedDir = FileUtilities.generatedAudioDirectory
@@ -232,9 +247,6 @@ final class NativeInferenceEngine {
                 let chunkMasks = MLXArray.ones([1, T, acousticDim])
                 let contextLatents = concatenated([srcLatents, chunkMasks], axis: -1)
 
-                _ = localLm
-                _ = localTokenizer
-
                 // ── Build cross-attention conditioning ─────────────────────────────
                 // Mirrors `AceStepConditionEncoder.forward` from upstream:
                 //   text:   tokens  → Qwen3 full forward → text_projector(1024→2048)
@@ -242,32 +254,42 @@ final class NativeInferenceEngine {
                 //   pack(lyric_encoded, text_projected) along the sequence dim.
                 localCont.yield(.preparing(message: "Encoding conditioning..."))
 
-                let encH = NativeInferenceEngine.buildEncoderHiddenStates(
+                let (encH, encMask) = NativeInferenceEngine.buildEncoderHiddenStates(
                     request:        request,
                     dit:            localDit,
                     textEncoder:    localTextEncoder,
                     textTokenizer:  localTextTokenizer,
                     silenceLatent:  localSilence.value
                 )
-                eval(encH)
+                eval(encH, encMask)
+                // Encoder transients (Qwen3 hidden states, lyric/timbre intermediates)
+                // are no longer reachable past this point — release them before the
+                // sampler's 8 forward passes start stacking activations.
+                MLX.Memory.clearCache()
 
                 try Task.checkCancellation()
 
                 let sampler = TurboSampler()
                 let result  = sampler.sample(
-                    noise:               noise,
-                    contextLatents:      contextLatents,
-                    encoderHiddenStates: encH,
-                    model:               localDit.decoder
+                    noise:                noise,
+                    contextLatents:       contextLatents,
+                    encoderHiddenStates:  encH,
+                    encoderAttentionMask: encMask,
+                    model:                localDit.decoder
                 ) { step, total in
                     localCont.yield(.step(current: step + 1, total: total))
                 }
 
                 try Task.checkCancellation()
                 localCont.yield(.saving)
+                // Free DiT activations before VAE decode — VAE intermediates can hit
+                // 1.5 GB+ for 60 s clips because the last Oobleck block holds [B, T*1920, 128].
+                MLX.Memory.clearCache()
 
                 let audio = localVae.decode(latent: result)
                 eval(audio)
+                // Release VAE intermediates now that we have the final waveform.
+                MLX.Memory.clearCache()
 
                 let filename = "generated-\(UUID().uuidString).wav"
                 let outputURL = generatedDir.appendingPathComponent(filename)
@@ -320,9 +342,11 @@ final class NativeInferenceEngine {
         textEncoder: Qwen3EncoderModel,
         textTokenizer: Qwen3Tokenizer,
         silenceLatent: MLXArray
-    ) -> MLXArray {
+    ) -> (hidden: MLXArray, mask: MLXArray) {
         // ── Text branch (caption + tags) ─────────────────────────────────────
-        let textPrompt = formatTextPrompt(prompt: request.prompt, tags: request.tags)
+        let textPrompt = formatTextPrompt(
+            prompt: request.prompt, tags: request.tags, duration: request.duration
+        )
         let textTokens = clampTokenLength(textTokenizer.encode(textPrompt), max: 256)
         var textBranch: (hidden: MLXArray, mask: MLXArray)? = nil
         if !textTokens.isEmpty {
@@ -364,19 +388,23 @@ final class NativeInferenceEngine {
         // (modeling_acestep_v15_turbo.py:1556-1557): pack(lyric, timbre), then
         // pack(result, text). For text-only or lyric-only requests we still include
         // timbre — that is what upstream does for plain text2music.
+        // We retain the packed key-padding mask for the DiT cross-attention
+        // (modeling_acestep_v15_turbo.py:516).
         switch (lyricBranch, textBranch) {
         case let (.some(l), .some(t)):
-            let (lt, ltMask) = PackSequences.pack(l.hidden, timbreHidden, l.mask, timbreMask)
-            let (packed, _)  = PackSequences.pack(lt, t.hidden, ltMask, t.mask)
-            return packed
+            let (lt, ltMask)  = PackSequences.pack(l.hidden, timbreHidden, l.mask, timbreMask)
+            let (packed, mk)  = PackSequences.pack(lt, t.hidden, ltMask, t.mask)
+            return (packed, mk)
         case let (.some(l), .none):
-            let (packed, _) = PackSequences.pack(l.hidden, timbreHidden, l.mask, timbreMask)
-            return packed
+            let (packed, mk)  = PackSequences.pack(l.hidden, timbreHidden, l.mask, timbreMask)
+            return (packed, mk)
         case let (.none, .some(t)):
-            let (packed, _) = PackSequences.pack(timbreHidden, t.hidden, timbreMask, t.mask)
-            return packed
+            let (packed, mk)  = PackSequences.pack(timbreHidden, t.hidden, timbreMask, t.mask)
+            return (packed, mk)
         case (.none, .none):
-            return dit.nullConditionEmb
+            // null_condition_emb is `[1, 1, hiddenSize]` — single valid position.
+            let mk = MLXArray.ones([1, dit.nullConditionEmb.shape[1]]).asType(.int32)
+            return (dit.nullConditionEmb, mk)
         }
     }
 
@@ -386,19 +414,36 @@ final class NativeInferenceEngine {
         return "# Languages\n\(lang)\n\n# Lyric\n\(lyrics)<|endoftext|>"
     }
 
-    /// Approximates upstream `SFT_GEN_PROMPT` (constants.py:158) using the values our
-    /// `GenerationParameters` actually carries (we don't have a separate caption/metas
-    /// split). Tags become `# Metas`; the prompt becomes `# Caption`.
-    private nonisolated static func formatTextPrompt(prompt: String, tags: [String]) -> String {
-        let caption     = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let metasJoined = tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                              .filter { !$0.isEmpty }
-                              .joined(separator: ", ")
-        let metasField  = metasJoined.isEmpty ? "" : "tags: \(metasJoined)"
+    /// Builds the `SFT_GEN_PROMPT` text input exactly as upstream
+    /// (`acestep/constants.py:101-109` + `acestep/handler.py:_dict_to_meta_string` 920-944).
+    ///
+    /// Upstream `# Metas` is a structured key-value block, NOT a tag list:
+    /// ```
+    /// - bpm: <bpm or N/A>
+    /// - timesignature: <ts or N/A>
+    /// - keyscale: <ks or N/A>
+    /// - duration: <int> seconds
+    /// ```
+    /// The model was SFT-trained on this exact form. We currently don't carry
+    /// bpm/timesignature/keyscale through `GenerationParameters`, so they default to
+    /// "N/A" (matching `_create_default_meta`). Tags are stylistic descriptors and
+    /// belong with the caption — append them there rather than the metas block.
+    private nonisolated static func formatTextPrompt(
+        prompt: String,
+        tags: [String],
+        duration: TimeInterval
+    ) -> String {
+        var caption = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tagsJoined = tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+        if !tagsJoined.isEmpty {
+            caption = caption.isEmpty ? tagsJoined : "\(caption), \(tagsJoined)"
+        }
+        if caption.isEmpty { return "" }   // caller falls back to nullConditionEmb
 
-        // If both empty, return empty string so the caller can fall back to nullConditionEmb.
-        if caption.isEmpty && metasField.isEmpty { return "" }
-
+        let durStr = "\(Int(duration)) seconds"
         return """
         # Instruction
         Fill the audio semantic mask based on the given conditions:
@@ -407,7 +452,10 @@ final class NativeInferenceEngine {
         \(caption)
 
         # Metas
-        \(metasField)<|endoftext|>
+        - bpm: N/A
+        - timesignature: N/A
+        - keyscale: N/A
+        - duration: \(durStr)<|endoftext|>
         """
     }
 
@@ -462,7 +510,7 @@ final class NativeInferenceEngine {
 
 private struct LoadedModels: @unchecked Sendable {
     let dit: ACEStepDiT
-    let lm: ACEStepLMModel
+    let lm: ACEStepLMModel?
     let vae: DCHiFiGANDecoder
     let silenceLatent: MLXArray
     let tokenizer: BPETokenizer?
