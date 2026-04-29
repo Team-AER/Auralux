@@ -1,4 +1,7 @@
+# macOS
 .DS_Store
+
+# Swift / Xcode build output
 .build/
 .swiftpm/
 DerivedData/
@@ -7,23 +10,16 @@ DerivedData/
 *.xcuserstate
 *.swp
 
-# Runtime/editor noise
+# Editor / runtime noise
 *.log
 .vscode/
 .idea/
 .env
 .env.*
 
-# Python runtime for local engine
-AuraluxEngine/.venv/
-AuraluxEngine/__pycache__/
+# Python (only used by tools/convert_weights.py and the reference model)
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
-
-# ACE-Step 1.5 cloned repo (installed at setup time)
-AuraluxEngine/ACE-Step-1.5/
-
-# Model checkpoints (downloaded at first run)
-AuraluxEngine/checkpoints/
+.venv/

@@ -204,7 +204,7 @@ final class ACEStepDiTTests: XCTestCase {
         }
     }
 
-    func testTurboSamplerOutputShape() {
+    func testTurboSamplerOutputShape() throws {
         let sampler     = TurboSampler(schedule: [1.0, 0.5])   // 2 steps for speed
         let model       = AceStepDiTModel(config: miniConfig)
         let B = 1, T = 4
@@ -212,7 +212,7 @@ final class ACEStepDiTTests: XCTestCase {
         let contextDim  = miniConfig.inChannels - acousticDim
 
         var stepCount = 0
-        let result = sampler.sample(
+        let result = try sampler.sample(
             noise:               MLXRandom.normal([B, T, acousticDim]),
             contextLatents:      MLXArray.zeros([B, T, contextDim]),
             encoderHiddenStates: MLXArray.zeros([B, 1, miniConfig.hiddenSize]),

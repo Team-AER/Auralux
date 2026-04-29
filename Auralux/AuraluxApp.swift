@@ -81,7 +81,7 @@ struct AuraluxApp: App {
                 Button("About Auralux") {
                     NSApplication.shared.orderFrontStandardAboutPanel(options: [
                         NSApplication.AboutPanelOptionKey.applicationName: AppConstants.appName,
-                        NSApplication.AboutPanelOptionKey.applicationVersion: "1.0.0",
+                        NSApplication.AboutPanelOptionKey.applicationVersion: "0.1.0",
                     ])
                 }
             }
