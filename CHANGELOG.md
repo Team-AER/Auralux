@@ -29,10 +29,9 @@ All notable changes to this project will be documented in this file.
 - SwiftUI macOS app built with Swift 6.2, `@Observable`, and SwiftData.
 - Prompt + tag + lyric editor with structured verse/chorus/bridge markup.
 - Audio playback via `AVAudioEngine` with waveform visualization and real-time FFT spectrum analyzer.
-- Multi-format export (WAV 16/24/32-bit, FLAC, MP3, AAC, ALAC).
+- Audio export (WAV, AAC `.m4a`, ALAC `.m4a` via `AudioExportService` + AVAssetWriter). FLAC and MP3 aren't supported by Apple's encoder and are filtered out of the picker.
 - Generation history (SwiftData) with search and favorites.
 - Preset system with bundle bootstrap.
-- Generation queue with priority ordering.
 - Sidebar navigation, log viewer window, engine status badge.
 - Centralized logging via `AppLogger` (`OSLog`).
 - CI pipeline (`macos-26`): `swift build`, CI-safe `swift test`, Python syntax check.

@@ -69,40 +69,50 @@ struct AudioExportConfiguration: Codable, Sendable {
 }
 
 final class AudioExportService: Sendable {
+    /// Exports into a directory, synthesising a filename from the configuration.
     func export(sourceURL: URL, destinationDirectory: URL, configuration: AudioExportConfiguration) async throws -> URL {
+        let name = "\(sanitizedFilename(configuration.title))_\(UUID().uuidString.prefix(8)).\(configuration.format.fileExtension)"
+        let destination = destinationDirectory.appendingPathComponent(name)
+        return try await export(
+            sourceURL: sourceURL,
+            destinationURL: destination,
+            format: configuration.format,
+            sampleRate: configuration.sampleRate
+        )
+    }
+
+    /// Exports to a caller-chosen URL. Pass `sampleRate <= 0` to keep the source rate.
+    func export(sourceURL: URL, destinationURL: URL, format: AudioExportFormat, sampleRate: Double = 0) async throws -> URL {
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
             throw AudioExportError.invalidSource
         }
 
-        let name = "\(sanitizedFilename(configuration.title))_\(UUID().uuidString.prefix(8)).\(configuration.format.fileExtension)"
-        let destination = destinationDirectory.appendingPathComponent(name)
-
-        switch configuration.format {
+        switch format {
         case .wav:
-            try copyFile(from: sourceURL, to: destination)
-            return destination
+            try copyFile(from: sourceURL, to: destinationURL)
+            return destinationURL
         case .flac, .alac:
             return try await transcode(
                 source: sourceURL,
-                destination: destination,
-                format: configuration.format,
-                sampleRate: configuration.sampleRate,
+                destination: destinationURL,
+                format: format,
+                sampleRate: sampleRate,
                 bitDepth: 16
             )
         case .aac:
             return try await transcode(
                 source: sourceURL,
-                destination: destination,
-                format: configuration.format,
-                sampleRate: configuration.sampleRate,
+                destination: destinationURL,
+                format: format,
+                sampleRate: sampleRate,
                 bitRate: 256_000
             )
         case .mp3:
             return try await transcode(
                 source: sourceURL,
-                destination: destination,
-                format: configuration.format,
-                sampleRate: configuration.sampleRate,
+                destination: destinationURL,
+                format: format,
+                sampleRate: sampleRate,
                 bitRate: 320_000
             )
         }

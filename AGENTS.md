@@ -28,7 +28,7 @@ auralux/
 │   │   ├── LM/                           # Optional 5 Hz audio-token LM + tokenizer
 │   │   └── Text/                         # Qwen3 encoder + tokenizer
 │   ├── Models/                           # SwiftData @Model + GenerationParameters + DiTVariant + GenerationMode
-│   ├── Services/                         # AudioPlayer/Export, History, Preset, Queue, ModelDownloader, ModelManager, PlaybackDiagnostics
+│   ├── Services/                         # AudioPlayer/Export, History, Preset, ModelDownloader, ModelManager, PlaybackDiagnostics
 │   ├── Utilities/                        # AppLogger, Constants, AudioFFT, FileUtilities
 │   ├── ViewModels/                       # @Observable state (Generation, Player, History, Settings, Sidebar)
 │   ├── Views/
@@ -49,7 +49,6 @@ auralux/
 ├── .github/workflows/ci.yml              # macos-26 swift build + CI-safe swift test + Python syntax
 ├── Package.swift                         # SPM manifest, Swift 6.2, mlx-swift dependency
 ├── README.md / CHANGELOG.md / CONTRIBUTING.md / CODE_OF_CONDUCT.md / SECURITY.md / SUPPORT.md
-├── PRD.md / plan.md / swift-migration-plan.md / RCA-noise-instead-of-music.md  (historical reference)
 └── LICENSE
 ```
 
@@ -71,7 +70,6 @@ Auralux runs as one Swift binary. The SwiftUI app and the inference engine share
 │              Service Layer                        │
 │  AudioPlayerService · AudioExportService          │
 │  HistoryService · PresetService                   │
-│  GenerationQueueService                           │
 │  ModelDownloader (actor) · ModelManagerService    │
 │  PlaybackDiagnosticsService                       │
 ├──────────────────────────────────────────────────┤
@@ -286,7 +284,6 @@ Tests live in `AuraluxTests/`:
 
 ## Important Notes
 
-- **PRD.md, plan.md, swift-migration-plan.md, RCA-noise-instead-of-music.md** are historical reference documents. Treat `docs/ARCHITECTURE.md` and this file as authoritative.
 - **No Xcode project file** — the project uses SPM exclusively (`Package.swift`).
 - **Models are not in the repo** — converted MLX weights are downloaded into `~/Library/Application Support/Auralux/Models/` at runtime (Turbo / SFT / Base) or produced by `tools/convert_weights.py` (XL / custom).
 - **The app runs as an SPM executable** — `AppDelegate` promotes the process to a regular GUI application (menu bar, Dock icon).

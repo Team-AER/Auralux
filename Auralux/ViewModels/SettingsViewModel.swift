@@ -67,21 +67,6 @@ final class SettingsViewModel {
         didSet { save(key: Keys.defaultCfgScale, value: defaultCfgScale) }
     }
 
-    var autoStartServer = true {
-        didSet { save(key: Keys.autoStartServer, value: autoStartServer) }
-    }
-
-    var maxConcurrentJobs = 1 {
-        didSet {
-            let clamped = max(1, min(4, maxConcurrentJobs))
-            if maxConcurrentJobs != clamped {
-                maxConcurrentJobs = clamped  // triggers didSet once more with clamped value
-                return
-            }
-            save(key: Keys.maxConcurrentJobs, value: clamped)
-        }
-    }
-
     var defaultExportFormat: AudioExportFormat = .wav {
         didSet { save(key: Keys.defaultExportFormat, value: defaultExportFormat.rawValue) }
     }
@@ -97,8 +82,6 @@ final class SettingsViewModel {
         quantizationMode = .fp16
         lowMemoryMode = false
         useLM = false
-        autoStartServer = true
-        maxConcurrentJobs = 1
         defaultExportFormat = .wav
         ditVariant = .turbo
         defaultMode = .text2music
@@ -113,8 +96,6 @@ final class SettingsViewModel {
         static let quantizationMode = "settings.quantizationMode"
         static let lowMemoryMode = "settings.lowMemoryMode"
         static let useLM = "settings.useLM"
-        static let autoStartServer = "settings.autoStartServer"
-        static let maxConcurrentJobs = "settings.maxConcurrentJobs"
         static let defaultExportFormat = "settings.defaultExportFormat"
         static let ditVariant = "settings.ditVariant"
         static let defaultMode = "settings.defaultMode"
@@ -151,13 +132,6 @@ final class SettingsViewModel {
         }
         if defaults.object(forKey: Keys.defaultCfgScale) != nil {
             defaultCfgScale = defaults.double(forKey: Keys.defaultCfgScale)
-        }
-        if defaults.object(forKey: Keys.autoStartServer) != nil {
-            autoStartServer = defaults.bool(forKey: Keys.autoStartServer)
-        }
-        if defaults.object(forKey: Keys.maxConcurrentJobs) != nil {
-            let stored = defaults.integer(forKey: Keys.maxConcurrentJobs)
-            maxConcurrentJobs = max(1, min(4, stored))
         }
         if let raw = defaults.string(forKey: Keys.defaultExportFormat),
            let format = AudioExportFormat(rawValue: raw),

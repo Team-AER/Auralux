@@ -76,10 +76,7 @@ struct ParameterControlsView: View {
             case .repaint:
                 Text("Keeps the source audio and regenerates only the time-ranges below. Output length follows the source.")
                     .font(.caption2).foregroundStyle(.secondary)
-            case .text2musicLM:
-                Text("LM-driven path is not implemented yet — generation will fail. Use Text → Music.")
-                    .font(.caption2).foregroundStyle(.orange)
-            case .text2music:
+            case .text2music, .text2musicLM:
                 EmptyView()
             }
         }

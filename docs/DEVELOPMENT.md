@@ -123,7 +123,6 @@ Auralux/
 ├── Services/                            # Business logic
 │   ├── AudioExportService.swift
 │   ├── AudioPlayerService.swift
-│   ├── GenerationQueueService.swift
 │   ├── HistoryService.swift
 │   ├── ModelDownloader.swift            # actor; HuggingFace sequential downloads
 │   ├── ModelManagerService.swift        # MLX artifact registry

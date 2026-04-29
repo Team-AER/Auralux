@@ -104,19 +104,6 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state, .idle)
     }
 
-    func testSettingsMaxConcurrentJobsClampSavesOnce() {
-        let suiteName = "test-clamp-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let vm = SettingsViewModel(defaults: defaults)
-        vm.maxConcurrentJobs = 10  // triggers clamping to 4
-
-        XCTAssertEqual(vm.maxConcurrentJobs, 4)
-        // The saved value should be 4, not 10.
-        XCTAssertEqual(defaults.integer(forKey: "settings.maxConcurrentJobs"), 4)
-    }
-
     // MARK: - GenerationState
 
     func testGenerationStateIsBusy() {
@@ -135,8 +122,6 @@ final class ViewModelTests: XCTestCase {
 
         XCTAssertEqual(vm.quantizationMode, .fp16)
         XCTAssertFalse(vm.lowMemoryMode)
-        XCTAssertTrue(vm.autoStartServer)
-        XCTAssertEqual(vm.maxConcurrentJobs, 1)
         XCTAssertEqual(vm.defaultExportFormat, .wav)
     }
 
@@ -147,15 +132,11 @@ final class ViewModelTests: XCTestCase {
         let vm1 = SettingsViewModel(defaults: defaults)
         vm1.quantizationMode = .fp16
         vm1.lowMemoryMode = true
-        vm1.autoStartServer = false
-        vm1.maxConcurrentJobs = 3
         vm1.defaultExportFormat = .alac  // .flac is unavailable, use .alac
 
         let vm2 = SettingsViewModel(defaults: defaults)
         XCTAssertEqual(vm2.quantizationMode, .fp16)
         XCTAssertTrue(vm2.lowMemoryMode)
-        XCTAssertFalse(vm2.autoStartServer)
-        XCTAssertEqual(vm2.maxConcurrentJobs, 3)
         XCTAssertEqual(vm2.defaultExportFormat, .alac)
 
         defaults.removePersistentDomain(forName: suiteName)
@@ -173,29 +154,16 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(vm.defaultExportFormat, .wav, "Unavailable format should fall back to .wav")
     }
 
-    func testSettingsMaxConcurrentJobsClamped() {
-        let defaults = UserDefaults(suiteName: "test-\(UUID().uuidString)")!
-        let vm = SettingsViewModel(defaults: defaults)
-
-        vm.maxConcurrentJobs = 10
-        XCTAssertEqual(vm.maxConcurrentJobs, 4)
-
-        vm.maxConcurrentJobs = 0
-        XCTAssertEqual(vm.maxConcurrentJobs, 1)
-    }
-
     func testSettingsResetToDefaults() {
         let defaults = UserDefaults(suiteName: "test-\(UUID().uuidString)")!
         let vm = SettingsViewModel(defaults: defaults)
         vm.quantizationMode = .fp16
         vm.lowMemoryMode = true
-        vm.maxConcurrentJobs = 4
 
         vm.resetToDefaults()
 
         XCTAssertEqual(vm.quantizationMode, .fp16)
         XCTAssertFalse(vm.lowMemoryMode)
-        XCTAssertEqual(vm.maxConcurrentJobs, 1)
     }
 
     // MARK: - PlayerViewModel

@@ -29,7 +29,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full development guide, t
 ## Branch and Commit Conventions
 
 - Branches: `feature/<short-name>`, `fix/<short-name>`, `docs/<short-name>`.
-- Commits: imperative summary (`Add queue retry backoff`).
+- Commits: imperative summary (`Add CFG twin-pass sampler`).
 - Keep commits logically grouped.
 
 ## Pull Request Checklist

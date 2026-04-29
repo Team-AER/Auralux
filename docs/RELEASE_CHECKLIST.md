@@ -23,7 +23,7 @@
 
 - [ ] Onboarding overlay disappears once `modelState` reaches `.ready`.
 - [ ] `EngineStatusView` toolbar badge reflects correct state.
-- [ ] Generation, playback, export (WAV / FLAC / MP3 / AAC / ALAC), history, presets, and queue all functional.
+- [ ] Generation, playback, export (WAV / AAC / ALAC), history, and presets all functional.
 - [ ] Log viewer window opens via Window menu and displays logs correctly.
 - [ ] App appears in Dock and gets keyboard focus (AppDelegate `setActivationPolicy(.regular)`).
 - [ ] Low-memory mode toggle takes effect on next launch (halves `MLX.Memory.cacheLimit`).

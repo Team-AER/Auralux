@@ -4,72 +4,6 @@ import XCTest
 
 final class ServiceTests: XCTestCase {
 
-    // MARK: - GenerationQueueService
-
-    func testQueueRespectsPriorityOrdering() async {
-        let queue = GenerationQueueService()
-
-        await queue.enqueue(.init(parameters: .default, priority: .low))
-        await queue.enqueue(.init(parameters: .default, priority: .high))
-        await queue.enqueue(.init(parameters: .default, priority: .normal))
-
-        let first = await queue.dequeue()
-        let second = await queue.dequeue()
-        let third = await queue.dequeue()
-
-        XCTAssertEqual(first?.priority, .high)
-        XCTAssertEqual(second?.priority, .normal)
-        XCTAssertEqual(third?.priority, .low)
-    }
-
-    func testQueueDequeueEmptyReturnsNil() async {
-        let queue = GenerationQueueService()
-        let item = await queue.dequeue()
-        XCTAssertNil(item)
-    }
-
-    func testQueueRemoveByID() async {
-        let queue = GenerationQueueService()
-        let item = GenerationQueueItem(parameters: .default, priority: .normal)
-        await queue.enqueue(item)
-        await queue.remove(id: item.id)
-        let dequeued = await queue.dequeue()
-        XCTAssertNil(dequeued)
-    }
-
-    func testQueueClear() async {
-        let queue = GenerationQueueService()
-        await queue.enqueue(.init(parameters: .default, priority: .low))
-        await queue.enqueue(.init(parameters: .default, priority: .high))
-        await queue.enqueue(.init(parameters: .default, priority: .normal))
-        await queue.clear()
-        let items = await queue.pendingItems()
-        XCTAssertTrue(items.isEmpty)
-    }
-
-    func testQueuePendingItems() async {
-        let queue = GenerationQueueService()
-        await queue.enqueue(.init(parameters: .default, priority: .normal))
-        await queue.enqueue(.init(parameters: .default, priority: .high))
-
-        let pending = await queue.pendingItems()
-        XCTAssertEqual(pending.count, 2)
-        XCTAssertEqual(pending.first?.priority, .high)
-    }
-
-    func testQueueSamePriorityFIFO() async {
-        let queue = GenerationQueueService()
-        let first = GenerationQueueItem(parameters: .default, priority: .normal)
-        let second = GenerationQueueItem(parameters: .default, priority: .normal)
-        await queue.enqueue(first)
-        await queue.enqueue(second)
-
-        let dequeued1 = await queue.dequeue()
-        let dequeued2 = await queue.dequeue()
-        XCTAssertEqual(dequeued1?.id, first.id)
-        XCTAssertEqual(dequeued2?.id, second.id)
-    }
-
     // MARK: - AudioFFT
 
     func testFFTMagnitudesEmptyInput() {
@@ -308,11 +242,4 @@ final class ServiceTests: XCTestCase {
         _ = samples // suppress unused warning
     }
 
-    // MARK: - GenerationQueueItem Priority Comparable
-
-    func testPriorityComparable() {
-        XCTAssertTrue(GenerationQueueItem.Priority.low < .normal)
-        XCTAssertTrue(GenerationQueueItem.Priority.normal < .high)
-        XCTAssertFalse(GenerationQueueItem.Priority.high < .low)
-    }
 }

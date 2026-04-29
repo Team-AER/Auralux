@@ -30,15 +30,6 @@ struct SettingsView: View {
                             .labelsHidden()
                     }
                     Divider()
-                    LabeledContent("Max parallel jobs") {
-                        Stepper(
-                            "\(viewModel.maxConcurrentJobs)",
-                            value: Bindable(viewModel).maxConcurrentJobs,
-                            in: 1...4
-                        )
-                        .fixedSize()
-                    }
-                    Divider()
                     VStack(alignment: .leading, spacing: 4) {
                         LabeledContent("Load 5Hz LM") {
                             Toggle("", isOn: Bindable(viewModel).useLM)
@@ -47,18 +38,11 @@ struct SettingsView: View {
                                     Task { await engine.loadModels() }
                                 }
                         }
-                        Text("Adds ~1.2 GB resident; required for LM-driven cover/repaint modes (work in progress).")
+                        Text("Loads the 5 Hz audio-token LM (~1.2 GB resident). Reserved for the upcoming text2music-LM mode; off by default.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                }
-            }
-
-            settingsCard("Inference", systemImage: "server.rack") {
-                LabeledContent("Auto-start local server") {
-                    Toggle("", isOn: Bindable(viewModel).autoStartServer)
-                        .labelsHidden()
                 }
             }
 

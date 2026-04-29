@@ -7,6 +7,7 @@ struct PlayerView: View {
     let track: GeneratedTrack
 
     @Environment(PlayerViewModel.self) private var viewModel
+    @Environment(SettingsViewModel.self) private var settings
 
     @State private var exportError: String? = nil
 
@@ -57,7 +58,7 @@ struct PlayerView: View {
                     exportAudio()
                 }
                 .disabled(track.audioFilePath == nil)
-                .help("Export audio as AAC (.m4a)")
+                .help("Export as \(settings.defaultExportFormat.rawValue.uppercased()) (set the format in Settings)")
 
                 @Bindable var vm = viewModel
                 Toggle("Loop", isOn: $vm.isLooping)
@@ -88,34 +89,26 @@ struct PlayerView: View {
         guard let path = track.audioFilePath,
               let sourceURL = FileUtilities.resolveAudioPath(path) else { return }
 
+        let format = settings.defaultExportFormat
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(track.title).m4a"
+        panel.nameFieldStringValue = "\(track.title).\(format.fileExtension)"
         panel.canCreateDirectories = true
-        panel.allowedContentTypes = [UTType(filenameExtension: "m4a") ?? .audio]
+        if let utType = UTType(filenameExtension: format.fileExtension) {
+            panel.allowedContentTypes = [utType]
+        } else {
+            panel.allowedContentTypes = [.audio]
+        }
 
         guard panel.runModal() == .OK, let destinationURL = panel.url else { return }
 
+        let service = AudioExportService()
         Task.detached(priority: .userInitiated) {
             do {
-                let sourceFile = try AVAudioFile(forReading: sourceURL)
-                let format = sourceFile.processingFormat
-                let frameCount = AVAudioFrameCount(sourceFile.length)
-
-                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-                    await MainActor.run { self.exportError = "Export failed: could not allocate buffer" }
-                    return
-                }
-                try sourceFile.read(into: buffer)
-
-                let outputSettings: [String: Any] = [
-                    AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: format.sampleRate,
-                    AVNumberOfChannelsKey: format.channelCount,
-                    AVEncoderBitRateKey: 256_000,
-                    AVEncoderAudioQualityKey: AVAudioQuality.max.rawValue
-                ]
-                let outputFile = try AVAudioFile(forWriting: destinationURL, settings: outputSettings)
-                try outputFile.write(from: buffer)
+                _ = try await service.export(
+                    sourceURL: sourceURL,
+                    destinationURL: destinationURL,
+                    format: format
+                )
                 await MainActor.run { self.exportError = nil }
             } catch {
                 await MainActor.run { self.exportError = "Export failed: \(error.localizedDescription)" }

@@ -11,11 +11,10 @@ Auralux is a native macOS application for AI music generation. It runs ACE-Step 
 - **Generation modes** — `text2music`, `cover`, `repaint`, `extract`
 - **DiT knobs** — number of steps, schedule shift, CFG scale (where applicable)
 - **Real-time playback** — waveform visualization and FFT spectrum analyzer
-- **Multi-format export** — WAV, FLAC, MP3, AAC, ALAC
+- **Audio export** — WAV, AAC (.m4a), or ALAC (.m4a). FLAC and MP3 aren't supported by Apple's encoder; the picker filters them out.
 - **Preset system** — save and reuse generation configurations
 - **Generation history** — browse, search, and favorite past tracks
 - **Audio import** — drag-and-drop reference / source audio for cover, repaint, extract
-- **Generation queue** — queue multiple jobs
 - **On-device inference** — pure Swift via [mlx-swift](https://github.com/ml-explore/mlx-swift)
 - **In-app model download** — first-launch onboarding fetches MLX-converted weights from HuggingFace
 - **Log viewer** — built-in window for debugging and monitoring
@@ -69,7 +68,7 @@ Auralux/                    # SwiftUI app
 │   └── Text/                         # Qwen3 text encoder + tokenizer
 ├── Views/                    # Onboarding, Generation, Player, History, Settings, Sidebar, AudioToAudio
 ├── ViewModels/               # @Observable state (Generation, Player, History, Settings, Sidebar)
-├── Services/                 # AudioPlayer, AudioExport, History, Preset, Queue, ModelDownloader, ModelManager, PlaybackDiagnostics
+├── Services/                 # AudioPlayer, AudioExport, History, Preset, ModelDownloader, ModelManager, PlaybackDiagnostics
 ├── Models/                   # SwiftData models + DiTVariant + GenerationMode + GenerationParameters
 ├── Components/               # TagChip, SliderControl, EngineStatusView, AudioDropZone, ProgressOverlay
 └── Utilities/                # AppLogger, Constants, AudioFFT, FileUtilities
@@ -100,7 +99,7 @@ modeling_acestep_v15_turbo.py # Reference PyTorch model (used by the converter o
 | Inference | mlx-swift (MLX, MLXNN, MLXRandom) |
 | Models | ACE-Step v1.5 DiT (2B) + Qwen3 text encoder + DC-HiFi-GAN VAE + optional 5 Hz LM (0.6B) |
 | Audio | AVAudioEngine, Accelerate (vDSP FFT) |
-| Export | AVFoundation (WAV, FLAC, MP3, AAC, ALAC) |
+| Export | AVFoundation (WAV / AAC / ALAC) |
 | Build | Swift Package Manager (Swift 6.2) |
 | CI | GitHub Actions (`swift build` + CI-safe `swift test`) |
 

@@ -12,7 +12,6 @@ Auralux is a single-process, fully native macOS application. The SwiftUI app and
 │              Service Layer                        │
 │  AudioPlayerService · AudioExportService          │
 │  HistoryService · PresetService                   │
-│  GenerationQueueService · PresetService           │
 │  ModelDownloader (actor) · ModelManagerService    │
 │  PlaybackDiagnosticsService                       │
 ├──────────────────────────────────────────────────┤
@@ -60,10 +59,9 @@ Auralux is a single-process, fully native macOS application. The SwiftUI app and
 Injected via `@Environment` from `AuraluxApp.init()`:
 
 - **`AudioPlayerService`** — `AVAudioEngine` wrapper, waveform data, real-time FFT
-- **`AudioExportService`** — multi-format export (WAV 16/24/32-bit, FLAC, MP3, AAC, ALAC)
+- **`AudioExportService`** — audio export via `AVAssetWriter`. WAV is a passthrough copy; AAC and ALAC are transcoded to `.m4a`. FLAC and MP3 are intentionally rejected with `AudioExportError.unsupported` because `AVAssetWriter` does not support them.
 - **`HistoryService`** — SwiftData CRUD for `GeneratedTrack`, search, favorites, orphan reconciliation
 - **`PresetService`** — preset CRUD, bundle bootstrap
-- **`GenerationQueueService`** — job queue with priority ordering
 - **`ModelDownloader`** (`actor`) — sequential, resumable HuggingFace downloads with weighted progress, post-download symlinking for variants that share components
 - **`ModelManagerService`** — registry of MLX artifacts (turbo / sft / base / xl-*)
 - **`PlaybackDiagnosticsService`** — diagnostics capture for misbehaving outputs

@@ -43,7 +43,7 @@ State machine: `notDownloaded → downloading → downloaded → loading → rea
 - `AuraluxApp` configures `MLX.Memory.cacheLimit`, builds the SwiftData `ModelContainer`, injects services via `@Environment`
 - `AppDelegate` promotes the SPM executable to a regular GUI app and forwards termination
 - `EngineStatusView` toolbar badge reflects `modelState`
-- Generation, playback, multi-format export, history, presets, queue, log viewer
+- Generation, playback, audio export (WAV / AAC / ALAC), history, presets, log viewer
 
 ### Build and tests
 
@@ -87,7 +87,7 @@ Sandbox enabled with `network.client`, `files.user-selected.read-write`, and `de
 |------|--------|-------|
 | Multi-track generation (vocal + instrumental) | Not started | Depends on upstream support |
 | Stem export | Not started | Per-track export |
-| Batch generation with seed arrays | Not started | Queue service exists; needs batch UI |
+| Batch generation with seed arrays | Not started | Needs a job queue (removed during cleanup) plus batch UI |
 | Keyboard shortcuts coverage | Partial | Audit and document |
 | URL scheme handler (`auralux://generate?...`) | Not started | Inter-app integration |
 | Performance profiling pass | Not started | Instruments: GPU, Memory, Energy |
