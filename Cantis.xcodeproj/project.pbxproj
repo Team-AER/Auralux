@@ -22,8 +22,8 @@
 		AE1100030000000000000001 /* Exceptions for "Cantis" folder in "Cantis" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				Info.plist,
 				Entitlements.plist,
+				Info.plist,
 			);
 			target = 1C7263562FA2955B007D20ED /* Cantis */;
 		};
@@ -390,7 +390,7 @@
 			repositoryURL = "https://github.com/ml-explore/mlx-swift";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = "0.21.0";
+				minimumVersion = 0.21.0;
 			};
 		};
 		AE3300010000000000000002 /* XCRemoteSwiftPackageReference "swift-collections" */ = {
@@ -398,7 +398,7 @@
 			repositoryURL = "https://github.com/apple/swift-collections.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = "1.1.0";
+				minimumVersion = 1.1.0;
 			};
 		};
 		AE3300010000000000000003 /* XCRemoteSwiftPackageReference "SwiftUI-Shimmer" */ = {
@@ -406,7 +406,7 @@
 			repositoryURL = "https://github.com/markiv/SwiftUI-Shimmer.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = "1.5.1";
+				minimumVersion = 1.5.1;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -438,7 +438,6 @@
 			productName = Shimmer;
 		};
 /* End XCSwiftPackageProductDependency section */
-
 	};
 	rootObject = 1C72634F2FA2955B007D20ED /* Project object */;
 }

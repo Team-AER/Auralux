@@ -201,18 +201,24 @@ final class AudioExportService: Sendable {
         }
         assetWriter.startSession(atSourceTime: .zero)
 
+        // AVFoundation pipeline objects are locally owned and don't escape beyond this
+        // continuation. nonisolated(unsafe) asserts single-owner safety to Swift 6.
+        nonisolated(unsafe) let wi = writerInput
+        nonisolated(unsafe) let ro = readerOutput
+        nonisolated(unsafe) let aw = assetWriter
+
         return try await withCheckedThrowingContinuation { continuation in
-            writerInput.requestMediaDataWhenReady(on: DispatchQueue(label: "app.aer.cantis.export")) {
-                while writerInput.isReadyForMoreMediaData {
-                    if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
-                        writerInput.append(sampleBuffer)
+            wi.requestMediaDataWhenReady(on: DispatchQueue(label: "app.aer.cantis.export")) {
+                while wi.isReadyForMoreMediaData {
+                    if let sampleBuffer = ro.copyNextSampleBuffer() {
+                        wi.append(sampleBuffer)
                     } else {
-                        writerInput.markAsFinished()
-                        assetWriter.finishWriting {
-                            if assetWriter.status == .completed {
+                        wi.markAsFinished()
+                        aw.finishWriting {
+                            if aw.status == .completed {
                                 continuation.resume(returning: destination)
                             } else {
-                                let msg = assetWriter.error?.localizedDescription ?? "Unknown writer error"
+                                let msg = aw.error?.localizedDescription ?? "Unknown writer error"
                                 continuation.resume(throwing: AudioExportError.transcodingFailed(msg))
                             }
                         }
