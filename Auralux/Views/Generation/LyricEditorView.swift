@@ -2,6 +2,7 @@ import SwiftUI
 
 struct LyricEditorView: View {
     @Binding var lyrics: String
+    @Environment(SettingsViewModel.self) private var settings
 
     var body: some View {
         GroupBox("Lyrics") {
@@ -16,6 +17,14 @@ struct LyricEditorView: View {
                             .allowsHitTesting(false)
                     }
                 }
+
+            if settings.ditVariant.usesCFGDistillation && !lyrics.isEmpty {
+                Text("Turbo models may skip later verses — switch to SFT for closer lyric following.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
+            }
         }
     }
 }
