@@ -46,4 +46,15 @@ final class HistoryViewModel {
             errorMessage = error.localizedDescription
         }
     }
+
+    func deleteAll(context: ModelContext) {
+        let service = HistoryService(context: context)
+        selectedTrack = nil
+        do {
+            try service.deleteAll()
+            refresh(context: context)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
 }

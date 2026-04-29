@@ -4,6 +4,8 @@ import SwiftUI
 struct HistoryBrowserView: View {
     @Environment(HistoryViewModel.self) private var viewModel
     @Environment(\.modelContext) private var modelContext
+    @State private var pendingDelete: GeneratedTrack?
+    @State private var showDeleteAllConfirm = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -25,6 +27,13 @@ struct HistoryBrowserView: View {
                 Button("Refresh") {
                     viewModel.refresh(context: modelContext)
                 }
+
+                Button(role: .destructive) {
+                    showDeleteAllConfirm = true
+                } label: {
+                    Label("Delete All", systemImage: "trash")
+                }
+                .disabled(viewModel.tracks.isEmpty)
             }
 
             if viewModel.tracks.isEmpty {
@@ -51,7 +60,14 @@ struct HistoryBrowserView: View {
                             }
                             Divider()
                             Button("Delete", role: .destructive) {
-                                viewModel.delete(track, context: modelContext)
+                                pendingDelete = track
+                            }
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                pendingDelete = track
+                            } label: {
+                                Label("Delete", systemImage: "trash")
                             }
                         }
                 }
@@ -64,6 +80,32 @@ struct HistoryBrowserView: View {
         }
         .onChange(of: viewModel.query) { _, _ in
             viewModel.refresh(context: modelContext)
+        }
+        .confirmationDialog(
+            pendingDelete.map { "Delete \($0.title)?" } ?? "",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            presenting: pendingDelete
+        ) { track in
+            Button("Delete", role: .destructive) {
+                viewModel.delete(track, context: modelContext)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: { _ in
+            Text("This removes the track and its audio file. This cannot be undone.")
+        }
+        .confirmationDialog(
+            "Delete all history?",
+            isPresented: $showDeleteAllConfirm
+        ) {
+            Button("Delete All", role: .destructive) {
+                viewModel.deleteAll(context: modelContext)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Removes every generated track and its audio file. This cannot be undone.")
         }
     }
 }

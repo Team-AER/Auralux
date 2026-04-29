@@ -47,6 +47,18 @@ final class HistoryService {
         try context.save()
     }
 
+    func deleteAll() throws {
+        let tracks = try context.fetch(FetchDescriptor<GeneratedTrack>())
+        for track in tracks {
+            if let path = track.audioFilePath,
+               let url = FileUtilities.resolveAudioPath(path) {
+                try? FileManager.default.removeItem(at: url)
+            }
+            context.delete(track)
+        }
+        try context.save()
+    }
+
     /// Removes audio files in the Generated directory that are not referenced
     /// by any GeneratedTrack row. Safe to call on every launch.
     /// The SwiftData fetch runs on the caller's actor; filesystem I/O is
