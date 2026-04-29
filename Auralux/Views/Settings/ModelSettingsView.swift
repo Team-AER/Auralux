@@ -14,6 +14,23 @@ struct ModelSettingsView: View {
     private var isLowMemoryMac: Bool { AppConstants.isLowMemoryMachine }
 
     var body: some View {
+        contentWithSheets
+            .modifier(CustomModelDialogs(
+                pendingDelete: $pendingCustomDelete,
+                pendingRedownload: $pendingCustomRedownload,
+                engine: engine,
+                deleteMessage: customDeleteMessage(for:)
+            ))
+            .modifier(VariantModelDialogs(
+                pendingDelete: $pendingDelete,
+                pendingRedownload: $pendingRedownload,
+                engine: engine,
+                deleteMessage: deleteMessage(for:),
+                redownloadMessage: redownloadMessage(for:)
+            ))
+    }
+
+    private var contentWithSheets: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Models")
@@ -41,69 +58,9 @@ struct ModelSettingsView: View {
                 .environment(engine)
                 .environment(settings)
         }
-        .confirmationDialog(
-            pendingCustomDelete.map { "Delete \($0.displayName)?" } ?? "",
-            isPresented: Binding(
-                get: { pendingCustomDelete != nil },
-                set: { if !$0 { pendingCustomDelete = nil } }
-            ),
-            presenting: pendingCustomDelete
-        ) { model in
-            Button("Delete", role: .destructive) {
-                Task { await engine.deleteCustom(model) }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: { model in
-            Text(customDeleteMessage(for: model))
-        }
-        .confirmationDialog(
-            pendingCustomRedownload.map { "Redownload \($0.displayName)?" } ?? "",
-            isPresented: Binding(
-                get: { pendingCustomRedownload != nil },
-                set: { if !$0 { pendingCustomRedownload = nil } }
-            ),
-            presenting: pendingCustomRedownload
-        ) { model in
-            Button("Redownload") {
-                Task { await engine.redownloadCustom(model) }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: { model in
-            Text("Deletes and redownloads \(model.displayName).")
-        }
         .sheet(item: $downloadSheetVariant) { variant in
             ModelDownloadSheet(variant: variant)
                 .environment(engine)
-        }
-        .confirmationDialog(
-            pendingDelete.map { "Delete \($0.displayName)?" } ?? "",
-            isPresented: Binding(
-                get: { pendingDelete != nil },
-                set: { if !$0 { pendingDelete = nil } }
-            ),
-            presenting: pendingDelete
-        ) { variant in
-            Button("Delete", role: .destructive) {
-                Task { await engine.delete(variant) }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: { variant in
-            Text(deleteMessage(for: variant))
-        }
-        .confirmationDialog(
-            pendingRedownload.map { "Redownload \($0.displayName)?" } ?? "",
-            isPresented: Binding(
-                get: { pendingRedownload != nil },
-                set: { if !$0 { pendingRedownload = nil } }
-            ),
-            presenting: pendingRedownload
-        ) { variant in
-            Button("Redownload") {
-                Task { await engine.redownload(variant) }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: { variant in
-            Text(redownloadMessage(for: variant))
         }
     }
 
@@ -534,5 +491,88 @@ struct ModelSettingsView: View {
             }
         }
         return "Deletes and redownloads \(variant.displayName) (\(size))."
+    }
+}
+
+private struct CustomModelDialogs: ViewModifier {
+    @Binding var pendingDelete: CustomModel?
+    @Binding var pendingRedownload: CustomModel?
+    let engine: NativeInferenceEngine
+    let deleteMessage: (CustomModel) -> String
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog(
+                pendingDelete.map { "Delete \($0.displayName)?" } ?? "",
+                isPresented: Binding(
+                    get: { pendingDelete != nil },
+                    set: { if !$0 { pendingDelete = nil } }
+                ),
+                presenting: pendingDelete
+            ) { model in
+                Button("Delete", role: .destructive) {
+                    Task { await engine.deleteCustom(model) }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: { model in
+                Text(deleteMessage(model))
+            }
+            .confirmationDialog(
+                pendingRedownload.map { "Redownload \($0.displayName)?" } ?? "",
+                isPresented: Binding(
+                    get: { pendingRedownload != nil },
+                    set: { if !$0 { pendingRedownload = nil } }
+                ),
+                presenting: pendingRedownload
+            ) { model in
+                Button("Redownload") {
+                    Task { await engine.redownloadCustom(model) }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: { model in
+                Text("Deletes and redownloads \(model.displayName).")
+            }
+    }
+}
+
+private struct VariantModelDialogs: ViewModifier {
+    @Binding var pendingDelete: DiTVariant?
+    @Binding var pendingRedownload: DiTVariant?
+    let engine: NativeInferenceEngine
+    let deleteMessage: (DiTVariant) -> String
+    let redownloadMessage: (DiTVariant) -> String
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog(
+                pendingDelete.map { "Delete \($0.displayName)?" } ?? "",
+                isPresented: Binding(
+                    get: { pendingDelete != nil },
+                    set: { if !$0 { pendingDelete = nil } }
+                ),
+                presenting: pendingDelete
+            ) { variant in
+                Button("Delete", role: .destructive) {
+                    Task { await engine.delete(variant) }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: { variant in
+                Text(deleteMessage(variant))
+            }
+            .confirmationDialog(
+                pendingRedownload.map { "Redownload \($0.displayName)?" } ?? "",
+                isPresented: Binding(
+                    get: { pendingRedownload != nil },
+                    set: { if !$0 { pendingRedownload = nil } }
+                ),
+                presenting: pendingRedownload
+            ) { variant in
+                Button("Redownload") {
+                    Task { await engine.redownload(variant) }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: { variant in
+                Text(redownloadMessage(variant))
+            }
     }
 }
