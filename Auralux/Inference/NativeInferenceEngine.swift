@@ -39,6 +39,23 @@ enum GenerationProgress: Sendable {
 
 // MARK: - Errors
 
+enum CustomModelImportError: LocalizedError {
+    case folderNotFound
+    case turboRequired
+    case missingFile(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .folderNotFound:
+            return "Selected folder does not exist."
+        case .turboRequired:
+            return "This model needs Turbo's shared components (lm/vae/text). Download Turbo first."
+        case .missingFile(let path):
+            return "Folder is missing required file: \(path)"
+        }
+    }
+}
+
 enum NativeEngineError: Error, LocalizedError {
     case modelsNotLoaded
     case weightsNotFound(URL)
@@ -66,10 +83,25 @@ final class NativeInferenceEngine {
     private(set) var isGenerating: Bool = false
     var isOnboarding: Bool = false
 
-    /// Which variant is currently being downloaded (nil = none).
-    private(set) var activeDownloadVariant: DiTVariant? = nil
-    /// Overall download progress for `activeDownloadVariant` in [0, 1].
+    /// Which model is currently being downloaded (nil = none).
+    private(set) var activeDownloadID: ModelID? = nil
+    /// Overall download progress for `activeDownloadID` in [0, 1].
     private(set) var downloadProgress: Double = 0
+
+    /// Built-in shorthand: currently-downloading built-in variant, if any.
+    var activeDownloadVariant: DiTVariant? {
+        if case .builtin(let v) = activeDownloadID { return v }
+        return nil
+    }
+    /// Currently-downloading custom model id, if any.
+    var activeDownloadCustomID: String? {
+        if case .custom(let id) = activeDownloadID { return id }
+        return nil
+    }
+
+    /// User-added custom models. Engine owns the registry so the UI can observe
+    /// it via the same `@Environment(NativeInferenceEngine.self)` binding.
+    let customModels = CustomModelRegistry()
 
     private var dit: ACEStepDiT?
     private var lm: ACEStepLMModel?
@@ -91,27 +123,59 @@ final class NativeInferenceEngine {
         return DiTVariant(rawValue: raw) ?? .turbo
     }
 
+    /// Currently-active custom model id (nil = use built-in `currentVariant`).
+    private var currentCustomModelID: String? {
+        let id = UserDefaults.standard.string(forKey: SettingsViewModel.Keys.activeCustomModelID)
+        return (id?.isEmpty == false) ? id : nil
+    }
+
+    /// The custom model currently selected for inference, if any.
+    var activeCustomModel: CustomModel? {
+        guard let id = currentCustomModelID else { return nil }
+        return customModels.model(id: id)
+    }
+
     func mlxModelDirectory(for variant: DiTVariant) -> URL {
         FileUtilities.modelDirectory.appendingPathComponent(variant.mlxDirectoryName, isDirectory: true)
     }
 
+    /// Directory the engine should load weights from — either the active
+    /// custom model's directory or the built-in variant's.
+    var activeModelDirectory: URL {
+        if let cm = activeCustomModel {
+            return cm.localDirectory
+        }
+        return mlxModelDirectory(for: currentVariant)
+    }
+
+    private static let requiredModelFiles: [String] = [
+        "dit/dit_weights.safetensors",
+        "dit/silence_latent.safetensors",
+        "lm/lm_weights.safetensors",
+        "vae/vae_weights.safetensors",
+        "text/text_weights.safetensors",
+        "text/text_vocab.json",
+        "text/text_merges.txt",
+    ]
+
     func isDownloaded(_ variant: DiTVariant) -> Bool {
-        let dir = mlxModelDirectory(for: variant)
-        let required = [
-            "dit/dit_weights.safetensors",
-            "dit/silence_latent.safetensors",
-            "lm/lm_weights.safetensors",
-            "vae/vae_weights.safetensors",
-            "text/text_weights.safetensors",
-            "text/text_vocab.json",
-            "text/text_merges.txt",
-        ]
-        return required.allSatisfy { path in
+        directoryHasRequiredFiles(mlxModelDirectory(for: variant))
+    }
+
+    func isDownloaded(_ custom: CustomModel) -> Bool {
+        directoryHasRequiredFiles(custom.localDirectory)
+    }
+
+    private func directoryHasRequiredFiles(_ dir: URL) -> Bool {
+        Self.requiredModelFiles.allSatisfy { path in
             FileManager.default.fileExists(atPath: dir.appendingPathComponent(path).path)
         }
     }
 
-    var weightsExist: Bool { isDownloaded(currentVariant) }
+    var weightsExist: Bool {
+        if let cm = activeCustomModel { return isDownloaded(cm) }
+        return isDownloaded(currentVariant)
+    }
 
     // MARK: - App Lifecycle
 
@@ -136,15 +200,15 @@ final class NativeInferenceEngine {
     /// (XL) will fail with a script instruction. SFT/base require turbo to be
     /// downloaded first (they symlink its shared components).
     func download(_ variant: DiTVariant) async {
-        guard activeDownloadVariant == nil else { return }
+        guard activeDownloadID == nil else { return }
         guard !isDownloaded(variant) else {
-            if variant == currentVariant, case .notDownloaded = modelState {
+            if isActiveBuiltin(variant), case .notDownloaded = modelState {
                 modelState = .downloaded
             }
             return
         }
         guard variant.canDownloadInApp else {
-            if variant == currentVariant {
+            if isActiveBuiltin(variant) {
                 modelState = .error(
                     "Run `python tools/convert_weights.py --variant \(variant.rawValue)` " +
                     "to convert this model (turbo must be converted first)."
@@ -153,9 +217,9 @@ final class NativeInferenceEngine {
             return
         }
 
-        activeDownloadVariant = variant
+        activeDownloadID = .builtin(variant)
         downloadProgress = 0
-        if variant == currentVariant { modelState = .downloading(progress: 0) }
+        if isActiveBuiltin(variant) { modelState = .downloading(progress: 0) }
         log.info("Downloading \(variant.rawValue) weights from HuggingFace", category: .inference)
 
         do {
@@ -168,29 +232,183 @@ final class NativeInferenceEngine {
             ) { [weak self] progress in
                 Task { @MainActor [weak self] in
                     self?.downloadProgress = progress
-                    if variant == self?.currentVariant {
-                        self?.modelState = .downloading(progress: progress)
+                    if let s = self, s.isActiveBuiltin(variant) {
+                        s.modelState = .downloading(progress: progress)
                     }
                 }
             }
             log.info("Download complete for \(variant.rawValue)", category: .inference)
         } catch {
             log.error("Download failed for \(variant.rawValue): \(error)", category: .inference)
-            if variant == currentVariant {
+            if isActiveBuiltin(variant) {
                 modelState = .error(error.localizedDescription)
             }
-            activeDownloadVariant = nil
+            activeDownloadID = nil
             return
         }
 
-        activeDownloadVariant = nil
-        if variant == currentVariant {
+        activeDownloadID = nil
+        if isActiveBuiltin(variant) {
             // Discard any models from a previously loaded variant and mark ready to load on demand.
             dit = nil; lm = nil; vae = nil
             silenceLatent = nil; tokenizer = nil; textEncoder = nil; textTokenizer = nil
             MLX.Memory.clearCache()
             modelState = .downloaded
         }
+    }
+
+    /// True iff `variant` is the currently-active built-in (no custom model selected).
+    private func isActiveBuiltin(_ variant: DiTVariant) -> Bool {
+        currentCustomModelID == nil && variant == currentVariant
+    }
+
+    private func isActiveCustom(_ id: String) -> Bool {
+        currentCustomModelID == id
+    }
+
+    // MARK: - Custom Model Lifecycle
+
+    /// Downloads a custom HF-managed model. Local-folder models don't go
+    /// through this path (no remote files to fetch).
+    func downloadCustom(_ model: CustomModel) async {
+        guard case .huggingFace(let repoID) = model.source else { return }
+        guard activeDownloadID == nil else { return }
+        guard !isDownloaded(model) else {
+            if isActiveCustom(model.id), case .notDownloaded = modelState {
+                modelState = .downloaded
+            }
+            return
+        }
+        if model.baseVariant.requiresTurboBase, !isDownloaded(.turbo) {
+            if isActiveCustom(model.id) {
+                modelState = .error("This model needs Turbo's shared components. Download Turbo first.")
+            }
+            return
+        }
+
+        activeDownloadID = .custom(model.id)
+        downloadProgress = 0
+        if isActiveCustom(model.id) { modelState = .downloading(progress: 0) }
+        log.info("Downloading custom model \(model.displayName) from \(repoID)", category: .inference)
+
+        do {
+            try await ModelDownloader.shared.downloadCustom(
+                repoID:        repoID,
+                baseVariant:   model.baseVariant,
+                to:            model.localDirectory,
+                turboDirectory: mlxModelDirectory(for: .turbo)
+            ) { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    self?.downloadProgress = progress
+                    if let s = self, s.isActiveCustom(model.id) {
+                        s.modelState = .downloading(progress: progress)
+                    }
+                }
+            }
+            log.info("Download complete for custom \(model.id)", category: .inference)
+        } catch {
+            log.error("Custom download failed for \(model.id): \(error)", category: .inference)
+            if isActiveCustom(model.id) {
+                modelState = .error(error.localizedDescription)
+            }
+            activeDownloadID = nil
+            return
+        }
+
+        activeDownloadID = nil
+        if isActiveCustom(model.id) {
+            dit = nil; lm = nil; vae = nil
+            silenceLatent = nil; tokenizer = nil; textEncoder = nil; textTokenizer = nil
+            MLX.Memory.clearCache()
+            modelState = .downloaded
+        }
+    }
+
+    /// Removes a custom model. HF-managed models also wipe their on-disk
+    /// directory; local-folder models are only unregistered.
+    func deleteCustom(_ model: CustomModel) async {
+        guard activeDownloadCustomID != model.id else { return }
+        let touchesActive = isActiveCustom(model.id)
+        if touchesActive {
+            releaseModels()
+        }
+        if case .huggingFace = model.source {
+            let dir = model.localDirectory
+            do {
+                if FileManager.default.fileExists(atPath: dir.path) {
+                    try FileManager.default.removeItem(at: dir)
+                }
+            } catch {
+                log.error("Failed to delete custom model \(model.id): \(error.localizedDescription)", category: .inference)
+                if touchesActive { modelState = .error(error.localizedDescription) }
+                return
+            }
+        }
+        customModels.remove(id: model.id)
+        if touchesActive {
+            UserDefaults.standard.removeObject(forKey: SettingsViewModel.Keys.activeCustomModelID)
+            modelState = .notDownloaded
+        }
+    }
+
+    func redownloadCustom(_ model: CustomModel) async {
+        guard case .huggingFace = model.source else { return }
+        let touchesActive = isActiveCustom(model.id)
+        if touchesActive { releaseModels() }
+        let dir = model.localDirectory
+        if FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        if touchesActive { modelState = .notDownloaded }
+        await downloadCustom(model)
+    }
+
+    /// Imports a local folder as a custom model. Validates that required
+    /// files exist; for `baseVariant` != .turbo, auto-creates lm/vae/text
+    /// symlinks pointing at the on-disk turbo directory if they're missing.
+    /// Throws on missing files or missing turbo dependency.
+    func importLocalCustomModel(
+        displayName: String,
+        folder: URL,
+        baseVariant: DiTVariant
+    ) throws -> CustomModel {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: folder.path) else {
+            throw CustomModelImportError.folderNotFound
+        }
+
+        // Auto-link shared components for sft/base bases when missing.
+        if baseVariant.requiresTurboBase {
+            guard isDownloaded(.turbo) else {
+                throw CustomModelImportError.turboRequired
+            }
+            let turboDir = mlxModelDirectory(for: .turbo)
+            for shared in ["lm", "vae", "text"] {
+                let link = folder.appendingPathComponent(shared)
+                if !fm.fileExists(atPath: link.path) {
+                    let target = turboDir.appendingPathComponent(shared).path
+                    try fm.createSymbolicLink(atPath: link.path, withDestinationPath: target)
+                }
+            }
+        }
+
+        // Validate file layout.
+        for path in Self.requiredModelFiles {
+            let p = folder.appendingPathComponent(path).path
+            if !fm.fileExists(atPath: p) {
+                throw CustomModelImportError.missingFile(path)
+            }
+        }
+
+        let model = CustomModel(
+            id: UUID().uuidString,
+            displayName: displayName.isEmpty ? folder.lastPathComponent : displayName,
+            source: .localFolder(absolutePath: folder.path),
+            baseVariant: baseVariant,
+            addedAt: Date()
+        )
+        customModels.add(model)
+        return model
     }
 
     /// Removes downloaded weights for a variant from disk. Deleting Turbo also
@@ -208,7 +426,7 @@ final class NativeInferenceEngine {
             }
         }
 
-        let touchesCurrent = toDelete.contains(currentVariant)
+        let touchesCurrent = currentCustomModelID == nil && toDelete.contains(currentVariant)
         if touchesCurrent {
             releaseModels()
         }
@@ -259,7 +477,7 @@ final class NativeInferenceEngine {
         // Read both settings at the call site: UserDefaults is thread-safe and
         // avoids capturing the @MainActor-bound SettingsViewModel in the detached task.
         let variant = currentVariant
-        let baseDir = mlxModelDirectory(for: variant)
+        let baseDir = activeModelDirectory
         let loadLM  = UserDefaults.standard.bool(forKey: SettingsViewModel.Keys.useLM)
         log.info("Loading MLX models (\(variant.rawValue)) from \(baseDir.path)", category: .inference)
 

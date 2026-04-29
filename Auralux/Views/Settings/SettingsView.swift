@@ -58,6 +58,8 @@ struct SettingsView: View {
                         .labelsHidden()
                         .frame(width: 220)
                         .onChange(of: viewModel.ditVariant) { _, _ in
+                            // Picking a built-in variant clears any active custom selection.
+                            viewModel.activeCustomModelID = nil
                             engine.unloadModels()
                         }
                     }

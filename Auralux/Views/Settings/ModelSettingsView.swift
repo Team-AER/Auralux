@@ -7,17 +7,69 @@ struct ModelSettingsView: View {
     @State private var downloadSheetVariant: DiTVariant? = nil
     @State private var pendingDelete: DiTVariant? = nil
     @State private var pendingRedownload: DiTVariant? = nil
+    @State private var showAddCustomSheet = false
+    @State private var pendingCustomDelete: CustomModel? = nil
+    @State private var pendingCustomRedownload: CustomModel? = nil
 
     private var isLowMemoryMac: Bool { AppConstants.isLowMemoryMachine }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Models")
-                .font(.headline)
+            HStack {
+                Text("Models")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    showAddCustomSheet = true
+                } label: {
+                    Label("Add Model", systemImage: "plus")
+                        .font(.callout)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
 
             loadedModelStatus
             variantList
+            if !engine.customModels.models.isEmpty {
+                customList
+            }
             pathFooter
+        }
+        .sheet(isPresented: $showAddCustomSheet) {
+            AddCustomModelSheet()
+                .environment(engine)
+                .environment(settings)
+        }
+        .confirmationDialog(
+            pendingCustomDelete.map { "Delete \($0.displayName)?" } ?? "",
+            isPresented: Binding(
+                get: { pendingCustomDelete != nil },
+                set: { if !$0 { pendingCustomDelete = nil } }
+            ),
+            presenting: pendingCustomDelete
+        ) { model in
+            Button("Delete", role: .destructive) {
+                Task { await engine.deleteCustom(model) }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: { model in
+            Text(customDeleteMessage(for: model))
+        }
+        .confirmationDialog(
+            pendingCustomRedownload.map { "Redownload \($0.displayName)?" } ?? "",
+            isPresented: Binding(
+                get: { pendingCustomRedownload != nil },
+                set: { if !$0 { pendingCustomRedownload = nil } }
+            ),
+            presenting: pendingCustomRedownload
+        ) { model in
+            Button("Redownload") {
+                Task { await engine.redownloadCustom(model) }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: { model in
+            Text("Deletes and redownloads \(model.displayName).")
         }
         .sheet(item: $downloadSheetVariant) { variant in
             ModelDownloadSheet(variant: variant)
@@ -149,11 +201,31 @@ struct ModelSettingsView: View {
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    private var customList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Custom Models")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                let models = engine.customModels.models
+                ForEach(models) { model in
+                    customRow(model)
+                    if model.id != models.last?.id {
+                        Divider()
+                    }
+                }
+            }
+            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
     @ViewBuilder
     private func variantRow(_ variant: DiTVariant) -> some View {
         let downloaded = engine.isDownloaded(variant)
         let isDownloading = engine.activeDownloadVariant == variant
-        let isActive = settings.ditVariant == variant && engine.modelState.isReady
+        let isActive = settings.activeCustomModelID == nil
+            && settings.ditVariant == variant
+            && engine.modelState.isReady
 
         HStack(spacing: 12) {
             // Status dot
@@ -272,6 +344,141 @@ struct ModelSettingsView: View {
         .buttonStyle(.plain)
         .foregroundStyle(.tint)
         .help(variant.canDownloadInApp ? "Download \(variant.displayName)" : "Requires conversion script")
+    }
+
+    // MARK: - Custom row
+
+    @ViewBuilder
+    private func customRow(_ model: CustomModel) -> some View {
+        let downloaded = engine.isDownloaded(model)
+        let isDownloading = engine.activeDownloadCustomID == model.id
+        let isActive = settings.activeCustomModelID == model.id && engine.modelState.isReady
+
+        HStack(spacing: 12) {
+            Circle()
+                .fill(customRowDotColor(downloaded: downloaded, downloading: isDownloading, active: isActive))
+                .frame(width: 7, height: 7)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(model.displayName)
+                        .font(.body.weight(.medium))
+                    if isActive {
+                        Text("In Use")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(.green.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.green)
+                    }
+                    Text("base: \(model.baseVariant.rawValue)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(.quaternary.opacity(0.4), in: Capsule())
+                }
+                Text(customRowSubtitle(model: model, downloaded: downloaded, downloading: isDownloading))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            if isDownloading {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("\(Int(engine.downloadProgress * 100))%")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            } else if downloaded {
+                customDownloadedActions(model)
+            } else {
+                Button {
+                    Task { await engine.downloadCustom(model) }
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.body)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
+                .help("Download \(model.displayName)")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            // Click anywhere on the row to make this model active.
+            settings.ditVariant = model.baseVariant
+            settings.activeCustomModelID = model.id
+            engine.unloadModels()
+        }
+    }
+
+    private func customRowDotColor(downloaded: Bool, downloading: Bool, active: Bool) -> Color {
+        if active      { return .green }
+        if downloading { return .blue }
+        if downloaded  { return .green.opacity(0.5) }
+        return .gray.opacity(0.4)
+    }
+
+    private func customRowSubtitle(model: CustomModel, downloaded: Bool, downloading: Bool) -> String {
+        if downloading {
+            return "Downloading \(Int(engine.downloadProgress * 100))%…"
+        }
+        if downloaded {
+            return "Ready — \(model.sourceDescription)"
+        }
+        if case .localFolder = model.source {
+            return "Folder missing required files — \(model.sourceDescription)"
+        }
+        return "Not downloaded — \(model.sourceDescription)"
+    }
+
+    @ViewBuilder
+    private func customDownloadedActions(_ model: CustomModel) -> some View {
+        Menu {
+            Button {
+                settings.ditVariant = model.baseVariant
+                settings.activeCustomModelID = model.id
+                engine.unloadModels()
+            } label: {
+                Label("Use This Model", systemImage: "checkmark.circle")
+            }
+            if case .huggingFace = model.source {
+                Button {
+                    pendingCustomRedownload = model
+                } label: {
+                    Label("Redownload", systemImage: "arrow.clockwise")
+                }
+            }
+            Button(role: .destructive) {
+                pendingCustomDelete = model
+            } label: {
+                Label(model.isHFManaged ? "Delete" : "Remove", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.body)
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Manage \(model.displayName)")
+    }
+
+    private func customDeleteMessage(for model: CustomModel) -> String {
+        switch model.source {
+        case .huggingFace:
+            return "Removes \(model.displayName) weights from disk and unregisters it."
+        case .localFolder:
+            return "Unregisters \(model.displayName). The original folder is left untouched."
+        }
     }
 
     // MARK: - Footer

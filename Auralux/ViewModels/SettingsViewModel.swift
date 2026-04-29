@@ -41,6 +41,19 @@ final class SettingsViewModel {
         }
     }
 
+    /// When non-nil, the engine loads weights from a user-added custom model
+    /// instead of the built-in `ditVariant` directory. The custom model still
+    /// inherits `ditVariant`'s config/step/CFG defaults (its base variant).
+    var activeCustomModelID: String? = nil {
+        didSet {
+            if let id = activeCustomModelID {
+                save(key: Keys.activeCustomModelID, value: id)
+            } else {
+                defaults.removeObject(forKey: Keys.activeCustomModelID)
+            }
+        }
+    }
+
     var defaultMode: GenerationMode = .text2music {
         didSet { save(key: Keys.defaultMode, value: defaultMode.rawValue) }
     }
@@ -84,6 +97,7 @@ final class SettingsViewModel {
         useLM = false
         defaultExportFormat = .wav
         ditVariant = .turbo
+        activeCustomModelID = nil
         defaultMode = .text2music
         defaultNumSteps = ditVariant.defaultNumSteps
         defaultScheduleShift = 1.0
@@ -98,6 +112,7 @@ final class SettingsViewModel {
         static let useLM = "settings.useLM"
         static let defaultExportFormat = "settings.defaultExportFormat"
         static let ditVariant = "settings.ditVariant"
+        static let activeCustomModelID = "settings.activeCustomModelID"
         static let defaultMode = "settings.defaultMode"
         static let defaultNumSteps = "settings.defaultNumSteps"
         static let defaultScheduleShift = "settings.defaultScheduleShift"
@@ -123,6 +138,9 @@ final class SettingsViewModel {
         if let raw = defaults.string(forKey: Keys.ditVariant),
            let variant = DiTVariant(rawValue: raw) {
             ditVariant = variant
+        }
+        if let id = defaults.string(forKey: Keys.activeCustomModelID), !id.isEmpty {
+            activeCustomModelID = id
         }
         if let raw = defaults.string(forKey: Keys.defaultMode),
            let mode = GenerationMode(rawValue: raw) {

@@ -75,7 +75,46 @@ actor ModelDownloader {
         guard !entries.isEmpty else {
             throw ModelDownloadError.scriptRequired(variant)
         }
+        try await performDownload(
+            entries:        entries,
+            to:             directory,
+            needsTurboLinks: variant.requiresTurboBase,
+            turboDirectory: turboDirectory,
+            onProgress:     onProgress
+        )
+    }
 
+    /// Downloads a custom ACE-Step-compatible model from an arbitrary HF repo.
+    /// File layout matches `baseVariant`'s manifest; lm/vae/text are symlinked
+    /// from the turbo directory when `baseVariant != .turbo`.
+    func downloadCustom(
+        repoID: String,
+        baseVariant: DiTVariant,
+        to directory: URL,
+        turboDirectory: URL,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws {
+        let proto = Self.manifest(for: baseVariant)
+        guard !proto.isEmpty else {
+            throw ModelDownloadError.scriptRequired(baseVariant)
+        }
+        let entries = proto.map { ManifestEntry(path: $0.path, repoID: repoID, bytes: $0.bytes) }
+        try await performDownload(
+            entries:        entries,
+            to:             directory,
+            needsTurboLinks: baseVariant.requiresTurboBase,
+            turboDirectory: turboDirectory,
+            onProgress:     onProgress
+        )
+    }
+
+    private func performDownload(
+        entries: [ManifestEntry],
+        to directory: URL,
+        needsTurboLinks: Bool,
+        turboDirectory: URL,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws {
         let totalBytes = entries.reduce(Int64(0)) { $0 + $1.bytes }
         var doneSoFar: Int64 = 0
 
@@ -105,11 +144,16 @@ actor ModelDownloader {
             doneSoFar += entry.bytes
         }
 
-        if variant != .turbo {
-            try createSymlinks(in: directory, linkedTo: turboDirectory)
+        if needsTurboLinks {
+            try createCustomSymlinks(in: directory, linkedTo: turboDirectory)
         }
 
         onProgress(1.0)
+    }
+
+    /// Estimated bytes for a custom model (uses the base variant's manifest sizes).
+    static func estimatedBytes(forCustomBase variant: DiTVariant) -> Int64 {
+        manifest(for: variant).reduce(0) { $0 + $1.bytes }
     }
 
     /// Shorthand for downloading the turbo variant (used by SetupView).
@@ -129,6 +173,19 @@ actor ModelDownloader {
             let link = variantDir.appendingPathComponent(sharedDir)
             if fm.fileExists(atPath: link.path) { continue }
             try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "../\(turboName)/\(sharedDir)")
+        }
+    }
+
+    /// Symlinks lm/, vae/, text/ from a custom-model directory to the turbo
+    /// directory. The two dirs may be siblings (same parent) or arbitrary —
+    /// we use absolute paths so external folders work too.
+    func createCustomSymlinks(in customDir: URL, linkedTo turboDir: URL) throws {
+        let fm = FileManager.default
+        for sharedDir in ["lm", "vae", "text"] {
+            let link = customDir.appendingPathComponent(sharedDir)
+            if fm.fileExists(atPath: link.path) { continue }
+            let target = turboDir.appendingPathComponent(sharedDir).path
+            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: target)
         }
     }
 
