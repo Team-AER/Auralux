@@ -26,6 +26,7 @@ final class AudioPlayerService {
     private var engineReady = false
     private var hasScheduledAudio = false
     private var scheduledStartTime: TimeInterval = 0
+    private var segmentGeneration = 0
     private let diagnostics = PlaybackDiagnosticsService()
 
     init() {
@@ -137,6 +138,7 @@ final class AudioPlayerService {
     }
 
     func stop() {
+        segmentGeneration += 1
         playerNode.stop()
         isPlaying = false
         currentTime = 0
@@ -172,10 +174,13 @@ final class AudioPlayerService {
             return
         }
 
+        segmentGeneration += 1
+        let gen = segmentGeneration
         scheduledStartTime = Double(clampedFrame) / sampleRate
         playerNode.scheduleSegment(audioFile, startingFrame: clampedFrame, frameCount: remainingFrames, at: nil) { [weak self] in
             guard let self else { return }
             Task { @MainActor in
+                guard self.segmentGeneration == gen else { return }
                 let finishedAt = self.currentTime
                 self.isPlaying = false
                 self.hasScheduledAudio = false
@@ -211,9 +216,12 @@ final class AudioPlayerService {
         }
         playerNode.stop()
         scheduledStartTime = 0
+        segmentGeneration += 1
+        let gen = segmentGeneration
         playerNode.scheduleFile(audioFile, at: nil) { [weak self] in
             guard let self else { return }
             Task { @MainActor in
+                guard self.segmentGeneration == gen else { return }
                 let finishedAt = self.currentTime
                 self.isPlaying = false
                 self.hasScheduledAudio = false
@@ -277,4 +285,5 @@ final class AudioPlayerService {
     func captureDiagnostics(reason: String = "manual_capture") -> URL? {
         diagnostics.persistSnapshot(reason: reason)
     }
+
 }

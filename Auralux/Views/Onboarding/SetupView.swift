@@ -174,12 +174,10 @@ struct SetupView: View {
             guard !hasError, !Task.isCancelled else { return }
         }
 
-        // Step 2: Model Weights — download from HuggingFace if missing, then load
+        // Step 2: Model Weights — download from HuggingFace if missing; loading happens on first generate
         if stepStatuses[.modelWeights] != .completed {
             await runStep(.modelWeights) {
-                if engine.weightsExist {
-                    await engine.loadModels()
-                } else {
+                if !engine.weightsExist {
                     try await engine.downloadAndLoad()
                 }
                 if case .error(let msg) = engine.modelState {

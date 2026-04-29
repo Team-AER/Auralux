@@ -39,6 +39,8 @@ struct EngineStatusView: View {
         switch engine.modelState {
         case .ready:
             return engine.isGenerating ? .yellow : .green
+        case .downloaded:
+            return engine.isGenerating ? .yellow : .green.opacity(0.6)
         case .loading:
             return .orange
         case .downloading:
@@ -53,6 +55,8 @@ struct EngineStatusView: View {
     private var statusLabel: String {
         switch engine.modelState {
         case .ready:
+            return engine.isGenerating ? "Generating" : "Ready"
+        case .downloaded:
             return engine.isGenerating ? "Generating" : "Ready"
         case .loading:
             return "Loading"
@@ -93,6 +97,12 @@ struct EngineStatusView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+            case .downloaded:
+                Divider()
+                Label("Models load automatically on first generate", systemImage: "arrow.clockwise")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
 
             case .loading:
                 HStack(spacing: 8) {

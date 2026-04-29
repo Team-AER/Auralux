@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(SettingsViewModel.self) private var viewModel
     @Environment(NativeInferenceEngine.self) private var engine
+    @Environment(PlayerViewModel.self) private var playerViewModel
 
     var body: some View {
         ScrollView {
@@ -140,6 +141,15 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .frame(width: 100)
+                }
+            }
+
+            settingsCard("Diagnostics", systemImage: "stethoscope") {
+                LabeledContent("Playback log") {
+                    Button("Capture RCA Log") {
+                        _ = playerViewModel.capturePlaybackDiagnostics(reason: "manual_capture_button")
+                    }
+                    .help("Write a playback diagnostics snapshot to Application Support/Auralux/Diagnostics")
                 }
             }
         }

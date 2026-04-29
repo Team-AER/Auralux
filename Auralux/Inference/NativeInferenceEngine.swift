@@ -7,14 +7,17 @@ import Observation
 
 enum ModelState: Equatable {
     case notDownloaded
+    case downloaded         // weights on disk, not yet loaded into memory
     case downloading(progress: Double)
     case loading
     case ready
     case error(String)
 
     var isReady: Bool {
-        if case .ready = self { return true }
-        return false
+        switch self {
+        case .ready, .downloaded: return true
+        default: return false
+        }
     }
 
     var isLoading: Bool {
@@ -76,6 +79,8 @@ final class NativeInferenceEngine {
     private var textEncoder: Qwen3EncoderModel?
     private var textTokenizer: Qwen3Tokenizer?
     private var generationTask: Task<Void, Never>?
+    private var heavyGenerationTask: Task<Void, Never>?
+    private var generationID: Int = 0
     private var activeContinuation: AsyncThrowingStream<GenerationProgress, Error>.Continuation?
     private let log = AppLogger.shared
 
@@ -113,7 +118,7 @@ final class NativeInferenceEngine {
     func checkStatus() async {
         if weightsExist {
             guard case .notDownloaded = modelState else { return }
-            await loadModels()
+            modelState = .downloaded
         } else {
             modelState = .notDownloaded
             isOnboarding = true
@@ -122,13 +127,7 @@ final class NativeInferenceEngine {
 
     func shutdown() {
         cancelGeneration()
-        dit = nil
-        lm = nil
-        vae = nil
-        silenceLatent = nil
-        tokenizer = nil
-        textEncoder = nil
-        textTokenizer = nil
+        releaseModels()
     }
 
     // MARK: - Model Download + Load
@@ -139,7 +138,9 @@ final class NativeInferenceEngine {
     func download(_ variant: DiTVariant) async {
         guard activeDownloadVariant == nil else { return }
         guard !isDownloaded(variant) else {
-            if variant == currentVariant { await loadModels() }
+            if variant == currentVariant, case .notDownloaded = modelState {
+                modelState = .downloaded
+            }
             return
         }
         guard variant.canDownloadInApp else {
@@ -183,7 +184,13 @@ final class NativeInferenceEngine {
         }
 
         activeDownloadVariant = nil
-        if variant == currentVariant { await loadModels() }
+        if variant == currentVariant {
+            // Discard any models from a previously loaded variant and mark ready to load on demand.
+            dit = nil; lm = nil; vae = nil
+            silenceLatent = nil; tokenizer = nil; textEncoder = nil; textTokenizer = nil
+            MLX.Memory.clearCache()
+            modelState = .downloaded
+        }
     }
 
     /// Downloads turbo then loads — used by SetupView for first-time onboarding.
@@ -196,7 +203,10 @@ final class NativeInferenceEngine {
     // MARK: - Model Loading
 
     func loadModels() async {
-        guard !isGenerating else { return }
+        switch modelState {
+        case .downloaded, .error: break
+        default: return
+        }
         modelState = .loading
 
         // Read both settings at the call site: UserDefaults is thread-safe and
@@ -259,173 +269,217 @@ final class NativeInferenceEngine {
     func generate(request: GenerationParameters) -> AsyncThrowingStream<GenerationProgress, Error> {
         let (stream, continuation) = AsyncThrowingStream<GenerationProgress, Error>.makeStream()
 
-        // Generation does not currently use `lm` or its tokenizer — they're loaded
-        // only when `settings.useLM` is on (gated in `loadModels`) so the audio-code
-        // pipeline can pick them up later. Don't require them here.
-        guard case .ready = modelState,
-              let dit = dit, let vae = vae, let silenceLatent = silenceLatent,
-              let textEncoder = textEncoder, let textTokenizer = textTokenizer else {
+        // Reject states where generation cannot even start
+        switch modelState {
+        case .notDownloaded:
             continuation.finish(throwing: NativeEngineError.modelsNotLoaded)
             return stream
-        }
-
-        // text2musicLM also needs the LM. Surface a clean error rather than
-        // letting the detached task panic on a nil unwrap below.
-        if request.mode == .text2musicLM, lm == nil {
-            continuation.finish(
-                throwing: NativeEngineError.generationFailed(
-                    "text2musicLM mode requires the 5 Hz LM. Toggle 'Load 5 Hz LM' in Settings."
-                )
-            )
+        case .downloading:
+            continuation.finish(throwing: NativeEngineError.generationFailed("A download is in progress. Please wait."))
             return stream
+        case .loading:
+            continuation.finish(throwing: NativeEngineError.generationFailed("Models are being loaded. Please wait."))
+            return stream
+        case .error(let msg):
+            continuation.finish(throwing: NativeEngineError.generationFailed(msg))
+            return stream
+        case .downloaded, .ready:
+            break
         }
 
         generationTask?.cancel()
+        heavyGenerationTask?.cancel()
         activeContinuation?.finish(throwing: CancellationError())
         activeContinuation = continuation
         isGenerating = true
+        generationID += 1
+        let capturedID = generationID
 
-        let localCont      = continuation
-        let localDit       = dit
-        let localVae       = vae
-        let localLm        = lm
-        let localSilence   = SendableMLXArray(value: silenceLatent)
-        let localTextEncoder   = textEncoder
-        let localTextTokenizer = textTokenizer
         let generatedDir = FileUtilities.generatedAudioDirectory
 
-        generationTask = Task.detached(priority: .userInitiated) {
-            do {
-                try Task.checkCancellation()
-                localCont.yield(.preparing(message: "Preparing inputs..."))
+        // Coordination task: loads models if needed, then launches heavy work.
+        generationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
 
-                let acousticDim = localDit.config.audioAcousticHiddenDim
-                let contextDim  = localDit.config.inChannels - acousticDim
-                guard contextDim == acousticDim * 2 else {
-                    throw NativeEngineError.generationFailed("Expected context dimension \(acousticDim * 2), got \(contextDim)")
+            // Phase 1: load on demand when weights are on disk but not in memory
+            if case .downloaded = self.modelState {
+                continuation.yield(.preparing(message: "Loading models..."))
+                await self.loadModels()
+                guard !Task.isCancelled else { return }
+                if case .error(let msg) = self.modelState {
+                    continuation.finish(
+                        throwing: NativeEngineError.generationFailed("Failed to load models: \(msg)")
+                    )
+                    return
                 }
+            }
 
-                // ── Per-mode acoustic latent setup ────────────────────────────────
-                // Resolves T (latent length), src_latents, clean_src_latents (repaint),
-                // and lm_hints_25Hz (cover/text2musicLM). All shapes are [1, T, 64].
-                let inputs = try NativeInferenceEngine.prepareModeInputs(
-                    request:       request,
-                    dit:           localDit,
-                    vae:           localVae,
-                    lm:            localLm,
-                    silenceLatent: localSilence.value,
-                    progress: { msg in localCont.yield(.preparing(message: msg)) }
+            // text2musicLM also needs the LM — surface a clean error now
+            if request.mode == .text2musicLM, self.lm == nil {
+                continuation.finish(
+                    throwing: NativeEngineError.generationFailed(
+                        "text2musicLM mode requires the 5 Hz LM. Toggle 'Load 5 Hz LM' in Settings."
+                    )
                 )
-                // Drop VAE-encoder / audio-tokenizer intermediates before we
-                // start stacking the encoder + sampler activations.
-                MLX.Memory.clearCache()
-                let T = inputs.frames
-                let srcLatentsForContext = inputs.srcLatents
-                let cleanSrcLatents = inputs.cleanSrcLatents
-                let repaintMask = inputs.repaintMask
-                let timbreLatent = inputs.timbreLatent
+                return
+            }
 
-                let noise      = MLXRandom.normal([1, T, acousticDim])
-                let chunkMasks = MLXArray.ones([1, T, acousticDim])
-                let contextLatents = concatenated([srcLatentsForContext, chunkMasks], axis: -1)
+            guard case .ready = self.modelState,
+                  let dit = self.dit, let vae = self.vae,
+                  let silenceLatent = self.silenceLatent,
+                  let textEncoder = self.textEncoder,
+                  let textTokenizer = self.textTokenizer else {
+                continuation.finish(throwing: NativeEngineError.modelsNotLoaded)
+                return
+            }
 
-                // ── Build cross-attention conditioning ─────────────────────────────
-                localCont.yield(.preparing(message: "Encoding conditioning..."))
+            guard !Task.isCancelled else { return }
 
-                let (encH, encMask) = NativeInferenceEngine.buildEncoderHiddenStates(
-                    request:        request,
-                    dit:            localDit,
-                    textEncoder:    localTextEncoder,
-                    textTokenizer:  localTextTokenizer,
-                    timbreLatent:   timbreLatent
-                )
-                eval(encH, encMask)
-                // Encoder transients (Qwen3 hidden states, lyric/timbre intermediates)
-                // are no longer reachable past this point — release them before the
-                // sampler's 8 forward passes start stacking activations.
-                MLX.Memory.clearCache()
+            let localCont          = continuation
+            let localDit           = dit
+            let localVae           = vae
+            let localLm            = self.lm
+            let localSilence       = SendableMLXArray(value: silenceLatent)
+            let localTextEncoder   = textEncoder
+            let localTextTokenizer = textTokenizer
 
-                try Task.checkCancellation()
-
-                // Build sampler — choice depends on whether the loaded DiT uses
-                // CFG distillation (turbo) or expects two-pass CFG (SFT/base).
-                let result: MLXArray
+            // Phase 2: run the generation on a background thread
+            self.heavyGenerationTask = Task.detached(priority: .userInitiated) {
                 do {
-                    if localDit.config.usesCFGDistillation {
-                        // Turbo: single forward pass, CFG baked into weights.
-                        let sampler = try TurboSampler(
-                            numSteps: request.numSteps,
-                            shift:    request.scheduleShift
-                        )
-                        result = sampler.sample(
-                            noise:                noise,
-                            contextLatents:       contextLatents,
-                            encoderHiddenStates:  encH,
-                            encoderAttentionMask: encMask,
-                            model:                localDit.decoder,
-                            repaint:              cleanSrcLatents.flatMap { src in
-                                repaintMask.map { mask in
-                                    TurboSampler.RepaintInputs(
-                                        cleanSrcLatents:    src,
-                                        mask:               mask,
-                                        injectionRatio:     request.repaintInjectionRatio,
-                                        crossfadeFrames:    request.repaintCrossfadeFrames,
-                                        noise:              noise
-                                    )
-                                }
-                            }
-                        ) { step, total in
-                            localCont.yield(.step(current: step + 1, total: total))
-                        }
-                    } else {
-                        // SFT / base: two forward passes per step (cond + uncond), CFG blend.
-                        let sampler = try CFGSampler(
-                            numSteps: request.numSteps,
-                            shift:    request.scheduleShift,
-                            cfgScale: Float(request.cfgScale)
-                        )
-                        result = sampler.sample(
-                            noise:                noise,
-                            contextLatents:       contextLatents,
-                            encoderHiddenStates:  encH,
-                            encoderAttentionMask: encMask,
-                            nullConditionEmb:     localDit.nullConditionEmb,
-                            model:                localDit.decoder
-                        ) { step, total in
-                            localCont.yield(.step(current: step + 1, total: total))
-                        }
+                    try Task.checkCancellation()
+                    localCont.yield(.preparing(message: "Preparing inputs..."))
+
+                    let acousticDim = localDit.config.audioAcousticHiddenDim
+                    let contextDim  = localDit.config.inChannels - acousticDim
+                    guard contextDim == acousticDim * 2 else {
+                        throw NativeEngineError.generationFailed("Expected context dimension \(acousticDim * 2), got \(contextDim)")
                     }
+
+                    // ── Per-mode acoustic latent setup ────────────────────────────────
+                    // Resolves T (latent length), src_latents, clean_src_latents (repaint),
+                    // and lm_hints_25Hz (cover/text2musicLM). All shapes are [1, T, 64].
+                    let inputs = try NativeInferenceEngine.prepareModeInputs(
+                        request:       request,
+                        dit:           localDit,
+                        vae:           localVae,
+                        lm:            localLm,
+                        silenceLatent: localSilence.value,
+                        progress: { msg in localCont.yield(.preparing(message: msg)) }
+                    )
+                    // Drop VAE-encoder / audio-tokenizer intermediates before we
+                    // start stacking the encoder + sampler activations.
+                    MLX.Memory.clearCache()
+                    let T = inputs.frames
+                    let srcLatentsForContext = inputs.srcLatents
+                    let cleanSrcLatents = inputs.cleanSrcLatents
+                    let repaintMask = inputs.repaintMask
+                    let timbreLatent = inputs.timbreLatent
+
+                    let noise      = MLXRandom.normal([1, T, acousticDim])
+                    let chunkMasks = MLXArray.ones([1, T, acousticDim])
+                    let contextLatents = concatenated([srcLatentsForContext, chunkMasks], axis: -1)
+
+                    // ── Build cross-attention conditioning ─────────────────────────────
+                    localCont.yield(.preparing(message: "Encoding conditioning..."))
+
+                    let (encH, encMask) = NativeInferenceEngine.buildEncoderHiddenStates(
+                        request:        request,
+                        dit:            localDit,
+                        textEncoder:    localTextEncoder,
+                        textTokenizer:  localTextTokenizer,
+                        timbreLatent:   timbreLatent
+                    )
+                    eval(encH, encMask)
+                    // Encoder transients (Qwen3 hidden states, lyric/timbre intermediates)
+                    // are no longer reachable past this point — release them before the
+                    // sampler's 8 forward passes start stacking activations.
+                    MLX.Memory.clearCache()
+
+                    try Task.checkCancellation()
+
+                    // Build sampler — choice depends on whether the loaded DiT uses
+                    // CFG distillation (turbo) or expects two-pass CFG (SFT/base).
+                    let result: MLXArray
+                    do {
+                        if localDit.config.usesCFGDistillation {
+                            // Turbo: single forward pass, CFG baked into weights.
+                            let sampler = try TurboSampler(
+                                numSteps: request.numSteps,
+                                shift:    request.scheduleShift
+                            )
+                            result = sampler.sample(
+                                noise:                noise,
+                                contextLatents:       contextLatents,
+                                encoderHiddenStates:  encH,
+                                encoderAttentionMask: encMask,
+                                model:                localDit.decoder,
+                                repaint:              cleanSrcLatents.flatMap { src in
+                                    repaintMask.map { mask in
+                                        TurboSampler.RepaintInputs(
+                                            cleanSrcLatents:    src,
+                                            mask:               mask,
+                                            injectionRatio:     request.repaintInjectionRatio,
+                                            crossfadeFrames:    request.repaintCrossfadeFrames,
+                                            noise:              noise
+                                        )
+                                    }
+                                }
+                            ) { step, total in
+                                localCont.yield(.step(current: step + 1, total: total))
+                            }
+                        } else {
+                            // SFT / base: two forward passes per step (cond + uncond), CFG blend.
+                            let sampler = try CFGSampler(
+                                numSteps: request.numSteps,
+                                shift:    request.scheduleShift,
+                                cfgScale: Float(request.cfgScale)
+                            )
+                            result = sampler.sample(
+                                noise:                noise,
+                                contextLatents:       contextLatents,
+                                encoderHiddenStates:  encH,
+                                encoderAttentionMask: encMask,
+                                nullConditionEmb:     localDit.nullConditionEmb,
+                                model:                localDit.decoder
+                            ) { step, total in
+                                localCont.yield(.step(current: step + 1, total: total))
+                            }
+                        }
+                    } catch {
+                        throw NativeEngineError.generationFailed(String(describing: error))
+                    }
+
+                    try Task.checkCancellation()
+                    localCont.yield(.saving)
+                    // Free DiT activations before VAE decode — VAE intermediates can hit
+                    // 1.5 GB+ for 60 s clips because the last Oobleck block holds [B, T*1920, 128].
+                    MLX.Memory.clearCache()
+
+                    let audio = localVae.decode(latent: result)
+                    eval(audio)
+                    // Release VAE intermediates now that we have the final waveform.
+                    MLX.Memory.clearCache()
+
+                    let filename = "generated-\(UUID().uuidString).wav"
+                    let outputURL = generatedDir.appendingPathComponent(filename)
+                    try NativeInferenceEngine.writeWAV(samples: audio, to: outputURL, sampleRate: 48000)
+
+                    try Task.checkCancellation()
+                    localCont.yield(.completed(audioURL: outputURL))
+                    localCont.finish()
                 } catch {
-                    throw NativeEngineError.generationFailed(String(describing: error))
+                    localCont.finish(throwing: error)
                 }
-
-                try Task.checkCancellation()
-                localCont.yield(.saving)
-                // Free DiT activations before VAE decode — VAE intermediates can hit
-                // 1.5 GB+ for 60 s clips because the last Oobleck block holds [B, T*1920, 128].
-                MLX.Memory.clearCache()
-
-                let audio = localVae.decode(latent: result)
-                eval(audio)
-                // Release VAE intermediates now that we have the final waveform.
-                MLX.Memory.clearCache()
-
-                let filename = "generated-\(UUID().uuidString).wav"
-                let outputURL = generatedDir.appendingPathComponent(filename)
-                try NativeInferenceEngine.writeWAV(samples: audio, to: outputURL, sampleRate: 48000)
-
-                try Task.checkCancellation()
-                localCont.yield(.completed(audioURL: outputURL))
-                localCont.finish()
-            } catch {
-                localCont.finish(throwing: error)
             }
         }
 
-        continuation.onTermination = { @Sendable _ in
-            Task { @MainActor [weak self] in
-                self?.isGenerating = false
-                self?.activeContinuation = nil
+        continuation.onTermination = { @Sendable [capturedID] _ in
+            Task { @MainActor [weak self, capturedID] in
+                guard let self, self.generationID == capturedID else { return }
+                self.isGenerating = false
+                self.activeContinuation = nil
+                self.heavyGenerationTask = nil
+                self.releaseModels()
             }
         }
 
@@ -434,10 +488,19 @@ final class NativeInferenceEngine {
 
     func cancelGeneration() {
         generationTask?.cancel()
+        heavyGenerationTask?.cancel()
         generationTask = nil
+        heavyGenerationTask = nil
         activeContinuation?.finish(throwing: CancellationError())
         activeContinuation = nil
         isGenerating = false
+    }
+
+    private func releaseModels() {
+        dit = nil; lm = nil; vae = nil
+        silenceLatent = nil; tokenizer = nil; textEncoder = nil; textTokenizer = nil
+        MLX.Memory.clearCache()
+        if case .ready = modelState { modelState = .downloaded }
     }
 
     // MARK: - Mode-specific input preparation

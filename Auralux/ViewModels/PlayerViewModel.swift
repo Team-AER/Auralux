@@ -1,4 +1,5 @@
 import AVFoundation
+import Accelerate
 import Foundation
 import Observation
 
@@ -25,6 +26,14 @@ final class PlayerViewModel {
     }
 
     var waveformSamples: [Float] = []
+    private var spectrogram: [[Float]] = []
+    private static let spectrogramFPS: Double = 20
+
+    var spectrumBins: [Float] {
+        guard isPlaying, !spectrogram.isEmpty, duration > 0 else { return [] }
+        let idx = max(0, min(spectrogram.count - 1, Int(currentTime * Self.spectrogramFPS)))
+        return spectrogram[idx]
+    }
 
     init(playerService: AudioPlayerService = AudioPlayerService()) {
         self.playerService = playerService
@@ -36,6 +45,7 @@ final class PlayerViewModel {
         errorMessage = nil
         waveformTask?.cancel()
         waveformSamples = []
+        spectrogram = []
         log.info("PlayerViewModel load path=\(path)", category: .player)
         guard let url = FileUtilities.resolveAudioPath(path) else {
             loadedPath = nil
@@ -47,11 +57,14 @@ final class PlayerViewModel {
             try playerService.load(url: url)
             loadedPath = path
             waveformTask = Task {
-                let samples = await Self.extractWaveform(from: url, targetSampleCount: 200)
+                async let waveformResult = Self.extractWaveform(from: url, targetSampleCount: 200)
+                async let spectrogramResult = Self.extractSpectrogram(from: url, fps: Self.spectrogramFPS)
+                let (samples, spectro) = await (waveformResult, spectrogramResult)
                 guard !Task.isCancelled else { return }
                 waveformSamples = samples
+                spectrogram = spectro
                 await MainActor.run {
-                    self.log.info("Waveform extraction complete samples=\(samples.count)", category: .player)
+                    self.log.info("Extraction complete waveform=\(samples.count) spectrogram=\(spectro.count)", category: .player)
                 }
             }
         } catch {
@@ -97,7 +110,6 @@ final class PlayerViewModel {
         return snapshotURL
     }
 
-    /// Downsamples audio file into an array of amplitude values for waveform rendering.
     static func extractWaveform(from url: URL, targetSampleCount: Int) async -> [Float] {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -112,9 +124,7 @@ final class PlayerViewModel {
                     continuation.resume(returning: [])
                     return
                 }
-                do {
-                    try file.read(into: buffer)
-                } catch {
+                do { try file.read(into: buffer) } catch {
                     continuation.resume(returning: [])
                     return
                 }
@@ -126,17 +136,92 @@ final class PlayerViewModel {
                 let samplesPerBin = max(1, frameCount / targetSampleCount)
                 var result: [Float] = []
                 result.reserveCapacity(targetSampleCount)
-
                 for bin in 0..<targetSampleCount {
                     let start = bin * samplesPerBin
                     if start >= frameCount { break }
                     let end = min(frameCount, start + samplesPerBin)
                     var peak: Float = 0
                     for i in start..<end {
-                        let sample = abs(channelData[i])
-                        if sample > peak { peak = sample }
+                        let s = abs(channelData[i])
+                        if s > peak { peak = s }
                     }
                     result.append(peak)
+                }
+                if let maxVal = result.max(), maxVal > 0 {
+                    let scale = 1.0 / maxVal
+                    for i in result.indices { result[i] *= scale }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    static func extractSpectrogram(from url: URL, fps: Double = 20, binCount: Int = 36) async -> [[Float]] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                guard let file = try? AVAudioFile(forReading: url) else {
+                    continuation.resume(returning: [])
+                    return
+                }
+                let sampleRate = file.processingFormat.sampleRate
+                let framesPerSlice = AVAudioFrameCount(max(1, sampleRate / fps))
+                let fftSize = 2048
+                let halfSize = fftSize / 2
+                let log2n = vDSP_Length(log2(Float(fftSize)))
+                guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+                    continuation.resume(returning: [])
+                    return
+                }
+                defer { vDSP_destroy_fftsetup(fftSetup) }
+
+                var hannWindow = [Float](repeating: 0, count: fftSize)
+                vDSP_hann_window(&hannWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+                var windowed = [Float](repeating: 0, count: fftSize)
+                var realPart = [Float](repeating: 0, count: halfSize)
+                var imagPart = [Float](repeating: 0, count: halfSize)
+
+                let sliceCount = Int(Double(file.length) / Double(framesPerSlice)) + 1
+                var result = [[Float]]()
+                result.reserveCapacity(sliceCount)
+
+                let format = file.processingFormat
+                while file.framePosition < file.length {
+                    guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: framesPerSlice),
+                          (try? file.read(into: buffer, frameCount: framesPerSlice)) != nil,
+                          buffer.frameLength > 0,
+                          let ch = buffer.floatChannelData?[0]
+                    else { break }
+
+                    let n = min(Int(buffer.frameLength), fftSize)
+                    vDSP_vmul(ch, 1, hannWindow, 1, &windowed, 1, vDSP_Length(n))
+                    if n < fftSize { for i in n..<fftSize { windowed[i] = 0 } }
+
+                    for i in 0..<halfSize {
+                        realPart[i] = windowed[i << 1]
+                        imagPart[i] = windowed[(i << 1) | 1]
+                    }
+
+                    realPart.withUnsafeMutableBufferPointer { rBuf in
+                        imagPart.withUnsafeMutableBufferPointer { iBuf in
+                            var split = DSPSplitComplex(realp: rBuf.baseAddress!, imagp: iBuf.baseAddress!)
+                            vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+                        }
+                    }
+
+                    let scale = 1.0 / Double(fftSize)
+                    var bins = [Float](repeating: 0, count: binCount)
+                    for i in 0..<binCount {
+                        let lo = Int(pow(Double(i)     / Double(binCount), 2.0) * Double(halfSize))
+                        let hi = max(lo + 1, Int(pow(Double(i + 1) / Double(binCount), 2.0) * Double(halfSize)))
+                        var peak: Double = 0
+                        for k in lo..<min(hi, halfSize) {
+                            let m = Double(realPart[k] * realPart[k] + imagPart[k] * imagPart[k]) * scale
+                            if m > peak { peak = m }
+                        }
+                        let dB = peak > 1e-20 ? 10.0 * log10(peak) : -100.0
+                        bins[i] = Float(max(0.0, min(1.0, (dB + 80.0) / 80.0)))
+                    }
+                    result.append(bins)
                 }
                 continuation.resume(returning: result)
             }

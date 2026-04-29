@@ -44,6 +44,10 @@ struct ModelSettingsView: View {
                     Text("Select a model below and click Download.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                case .downloaded:
+                    Text("Models are unloaded. They will load automatically when you generate.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 case .downloading(let progress):
                     VStack(alignment: .leading, spacing: 4) {
                         ProgressView(value: progress)
@@ -81,6 +85,7 @@ struct ModelSettingsView: View {
     private var statusColor: Color {
         switch engine.modelState {
         case .ready:         return .green
+        case .downloaded:    return .green.opacity(0.6)
         case .loading:       return .orange
         case .downloading:   return .blue
         case .notDownloaded: return .gray
@@ -91,6 +96,7 @@ struct ModelSettingsView: View {
     private var statusTitle: String {
         switch engine.modelState {
         case .ready:                    return "Models loaded — ready to generate"
+        case .downloaded:               return "Ready — models load on first generate"
         case .loading:                  return "Loading model weights…"
         case .downloading(let p):       return "Downloading (\(Int(p * 100))%)"
         case .notDownloaded:            return "No model loaded"

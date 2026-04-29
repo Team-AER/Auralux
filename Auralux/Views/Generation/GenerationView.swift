@@ -21,7 +21,7 @@ struct GenerationView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if !engineReady && !engine.isOnboarding {
+                if !engineReady && !engine.isOnboarding && !engine.isGenerating {
                     modelBanner
                 }
 
@@ -129,6 +129,9 @@ struct GenerationView: View {
         switch engine.modelState {
         case .notDownloaded:
             notDownloadedBanner
+
+        case .downloaded:
+            EmptyView()
 
         case .downloading(let progress):
             HStack(spacing: 12) {

@@ -29,7 +29,7 @@ struct PlayerView: View {
             .frame(height: 120)
 
             SpectrumAnalyzerView(
-                magnitudes: viewModel.playerService.spectrumMagnitudes,
+                magnitudes: viewModel.spectrumBins,
                 isPlaying: viewModel.isPlaying
             )
             .frame(height: 90)
@@ -47,11 +47,6 @@ struct PlayerView: View {
                     viewModel.stop()
                 }
                 .disabled(viewModel.errorMessage != nil)
-
-                Button("Capture RCA Log") {
-                    _ = viewModel.capturePlaybackDiagnostics(reason: "manual_capture_button")
-                }
-                .help("Write a playback diagnostics snapshot to Application Support/Auralux/Diagnostics")
 
                 @Bindable var vm = viewModel
                 Toggle("Loop", isOn: $vm.isLooping)
