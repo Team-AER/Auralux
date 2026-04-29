@@ -19,6 +19,10 @@ final class PlayerViewModel {
         get { playerService.isLooping }
         set { playerService.isLooping = newValue }
     }
+    var volume: Float {
+        get { playerService.volume }
+        set { playerService.volume = max(0, min(1, newValue)) }
+    }
 
     var progress: Double {
         guard duration > 0 else { return 0 }

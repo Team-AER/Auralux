@@ -28,6 +28,12 @@ struct PlayerView: View {
                     .font(.callout)
             }
 
+            if generationViewModel.state.isBusy {
+                ProgressView(value: generationViewModel.progress)
+                    .progressViewStyle(.linear)
+                    .accessibilityIdentifier("generation-progress")
+            }
+
             WaveformView(
                 progress: viewModel.progress,
                 samples: viewModel.waveformSamples,
@@ -35,43 +41,49 @@ struct PlayerView: View {
             )
             .frame(height: 120)
 
-            VStack(alignment: .leading, spacing: 6) {
-                if generationViewModel.state.isBusy {
-                    ProgressView(value: generationViewModel.progress)
-                        .progressViewStyle(.linear)
-                        .accessibilityIdentifier("generation-progress")
-                }
-                SpectrumAnalyzerView(
-                    magnitudes: viewModel.spectrumBins,
-                    isPlaying: viewModel.isPlaying
-                )
-                .frame(height: 90)
-            }
+            SpectrumAnalyzerView(
+                magnitudes: viewModel.spectrumBins,
+                isPlaying: viewModel.isPlaying
+            )
+            .frame(height: 90)
 
             HStack(spacing: 12) {
-                Button(viewModel.isPlaying ? "Pause" : "Play") {
+                Button {
                     viewModel.playPause()
+                } label: {
+                    Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
+                        .frame(width: 16, height: 16)
                 }
                 .keyboardShortcut(.space, modifiers: [])
                 .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
                 .accessibilityIdentifier("play-pause-button")
+                .help(viewModel.isPlaying ? "Pause" : "Play")
                 .disabled(viewModel.errorMessage != nil)
 
-                Button("Stop") {
-                    viewModel.stop()
-                }
-                .disabled(viewModel.errorMessage != nil)
-
-                Button("Export") {
+                Button {
                     exportAudio()
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .frame(width: 16, height: 16)
                 }
                 .disabled(track.audioFilePath == nil)
+                .accessibilityLabel("Export")
                 .help("Export as \(settings.defaultExportFormat.rawValue.uppercased()) (set the format in Settings)")
 
                 @Bindable var vm = viewModel
                 Toggle("Loop", isOn: $vm.isLooping)
                     .toggleStyle(.switch)
                     .frame(width: 110)
+
+                HStack(spacing: 6) {
+                    Image(systemName: volumeIconName)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+                    Slider(value: $vm.volume, in: 0...1)
+                        .frame(width: 100)
+                        .accessibilityLabel("Volume")
+                        .accessibilityIdentifier("volume-slider")
+                }
 
                 Spacer()
 
@@ -121,6 +133,15 @@ struct PlayerView: View {
             } catch {
                 await MainActor.run { self.exportError = "Export failed: \(error.localizedDescription)" }
             }
+        }
+    }
+
+    private var volumeIconName: String {
+        switch viewModel.volume {
+        case ..<0.001: "speaker.slash.fill"
+        case ..<0.34: "speaker.wave.1.fill"
+        case ..<0.67: "speaker.wave.2.fill"
+        default: "speaker.wave.3.fill"
         }
     }
 

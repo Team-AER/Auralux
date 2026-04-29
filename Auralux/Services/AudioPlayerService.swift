@@ -9,7 +9,7 @@ final class AudioPlayerService {
     var isLooping = false
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
-    var volume: Float = 1 {
+    var volume: Float = 0.67 {
         didSet {
             if engineReady { engine.mainMixerNode.outputVolume = volume }
         }
